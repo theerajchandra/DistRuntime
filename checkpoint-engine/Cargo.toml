@@ -1,0 +1,5 @@
+[package]
+name = "checkpoint-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true

@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "coordinator",
+    "worker-client",
+    "checkpoint-engine",
+    "data-loader",
+    "proto-gen",
+    "py-runtime",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
