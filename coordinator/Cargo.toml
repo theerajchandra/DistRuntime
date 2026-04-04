@@ -7,10 +7,15 @@ license.workspace = true
 [dependencies]
 tokio.workspace = true
 tonic.workspace = true
+tonic-prost.workspace = true
 prost.workspace = true
 serde.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 proto-gen.workspace = true
-checkpoint-engine.workspace = true
-data-loader.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
+tempfile.workspace = true
+tokio-stream.workspace = true
+worker-client.workspace = true

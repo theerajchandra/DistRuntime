@@ -25,11 +25,13 @@ pyo3 = { version = "0.28", features = ["auto-initialize"] }
 serde = { version = "1", features = ["derive"] }
 anyhow = "1"
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-trait = "0.1"
 bytes = "1"
 aws-sdk-s3 = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 tempfile = "3"
+tokio-stream = "0.1"
 
 # intra-workspace crates
 coordinator = { path = "coordinator" }

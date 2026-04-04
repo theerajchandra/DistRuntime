@@ -1,0 +1,92 @@
+use anyhow::{Context, Result};
+use proto_gen::distruntime::coordinator_service_client::CoordinatorServiceClient;
+use proto_gen::distruntime::{HeartbeatRequest, WorkerInfo, WorkerReadyRequest};
+use std::time::Duration;
+use tokio::task::JoinHandle;
+use tonic::transport::Channel;
+
+const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+
+pub struct WorkerClient {
+    client: CoordinatorServiceClient<Channel>,
+    worker_id: String,
+    heartbeat_interval: Duration,
+}
+
+impl WorkerClient {
+    pub async fn connect(coordinator_addr: &str) -> Result<Self> {
+        Self::connect_with_interval(coordinator_addr, DEFAULT_HEARTBEAT_INTERVAL).await
+    }
+
+    pub async fn connect_with_interval(
+        coordinator_addr: &str,
+        heartbeat_interval: Duration,
+    ) -> Result<Self> {
+        let client = CoordinatorServiceClient::connect(coordinator_addr.to_string())
+            .await
+            .with_context(|| format!("failed to connect to coordinator at {coordinator_addr}"))?;
+
+        Ok(Self {
+            client,
+            worker_id: String::new(),
+            heartbeat_interval,
+        })
+    }
+
+    /// Register this worker with the coordinator. Returns the assigned worker ID.
+    pub async fn register(&mut self, address: &str, port: u32) -> Result<String> {
+        let resp = self
+            .client
+            .worker_ready(WorkerReadyRequest {
+                info: Some(WorkerInfo {
+                    worker_id: String::new(),
+                    address: address.to_string(),
+                    port,
+                }),
+                capabilities: vec![],
+            })
+            .await
+            .context("WorkerReady RPC failed")?
+            .into_inner();
+
+        if !resp.accepted {
+            anyhow::bail!("coordinator rejected worker registration");
+        }
+
+        self.worker_id = resp.assigned_worker_id.clone();
+        tracing::info!(worker_id = %self.worker_id, "registered with coordinator");
+        Ok(resp.assigned_worker_id)
+    }
+
+    /// Spawn a background task that sends heartbeats at the configured interval.
+    /// Returns a handle; dropping the returned `AbortHandle` stops the loop.
+    pub fn start_heartbeat(&self) -> (JoinHandle<()>, tokio::task::AbortHandle) {
+        let mut client = self.client.clone();
+        let worker_id = self.worker_id.clone();
+        let interval = self.heartbeat_interval;
+
+        let handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            loop {
+                ticker.tick().await;
+                let req = HeartbeatRequest {
+                    worker_id: worker_id.clone(),
+                    epoch: 0,
+                    step: 0,
+                    throughput_samples_per_sec: 0.0,
+                };
+                match client.heartbeat(req).await {
+                    Ok(_) => {
+                        tracing::trace!(worker_id = %worker_id, "heartbeat acknowledged");
+                    }
+                    Err(e) => {
+                        tracing::warn!(worker_id = %worker_id, error = %e, "heartbeat failed");
+                    }
+                }
+            }
+        });
+
+        let abort = handle.abort_handle();
+        (handle, abort)
+    }
+}
