@@ -3,3 +3,14 @@ name = "coordinator"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tonic.workspace = true
+prost.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+proto-gen.workspace = true
+checkpoint-engine.workspace = true
+data-loader.workspace = true

@@ -3,3 +3,11 @@ name = "worker-client"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tonic.workspace = true
+prost.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+proto-gen.workspace = true

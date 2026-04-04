@@ -3,3 +3,12 @@ name = "py-runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+pyo3.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]

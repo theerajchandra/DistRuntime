@@ -13,3 +13,20 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1.51", features = ["full"] }
+tonic = "0.14"
+prost = "0.14"
+tonic-build = "0.14"
+pyo3 = { version = "0.28", features = ["auto-initialize"] }
+serde = { version = "1", features = ["derive"] }
+anyhow = "1"
+tracing = "0.1"
+
+# intra-workspace crates
+coordinator = { path = "coordinator" }
+worker-client = { path = "worker-client" }
+checkpoint-engine = { path = "checkpoint-engine" }
+data-loader = { path = "data-loader" }
+proto-gen = { path = "proto-gen" }
