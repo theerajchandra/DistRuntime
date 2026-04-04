@@ -116,6 +116,17 @@ impl LivenessTracker {
         })
     }
 
+    /// Returns the IDs of all workers currently marked alive.
+    pub async fn alive_worker_ids(&self) -> Vec<String> {
+        let state = self.inner.lock().await;
+        state
+            .workers
+            .values()
+            .filter(|e| e.alive)
+            .map(|e| e.worker_id.clone())
+            .collect()
+    }
+
     pub fn shutdown(&self) {
         self.shutdown.notify_one();
     }

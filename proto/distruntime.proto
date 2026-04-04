@@ -88,6 +88,22 @@ message CheckpointAbortResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Dataset registration
+// ---------------------------------------------------------------------------
+
+message RegisterDatasetRequest {
+  string job_id = 1;
+  string uri = 2;
+  string format = 3;
+  uint64 num_shards = 4;
+}
+
+message RegisterDatasetResponse {
+  string dataset_id = 1;
+  bool accepted = 2;
+}
+
+// ---------------------------------------------------------------------------
 // Worker lifecycle
 // ---------------------------------------------------------------------------
 
@@ -123,6 +139,7 @@ service CoordinatorService {
   rpc CheckpointCommit(CheckpointCommitRequest) returns (CheckpointCommitResponse);
   rpc CheckpointAbort(CheckpointAbortRequest) returns (CheckpointAbortResponse);
   rpc RecoverWorker(RecoverWorkerRequest) returns (RecoverWorkerResponse);
+  rpc RegisterDataset(RegisterDatasetRequest) returns (RegisterDatasetResponse);
 }
 
 service WorkerService {

@@ -2,20 +2,23 @@ use proto_gen::distruntime::coordinator_service_server::CoordinatorService;
 use proto_gen::distruntime::{
     CheckpointAbortRequest, CheckpointAbortResponse, CheckpointBeginRequest,
     CheckpointBeginResponse, CheckpointCommitRequest, CheckpointCommitResponse, HeartbeatRequest,
-    HeartbeatResponse, RecoverWorkerRequest, RecoverWorkerResponse, WorkerReadyRequest,
-    WorkerReadyResponse,
+    HeartbeatResponse, RecoverWorkerRequest, RecoverWorkerResponse, RegisterDatasetRequest,
+    RegisterDatasetResponse, WorkerReadyRequest, WorkerReadyResponse,
 };
 use tonic::{Request, Response, Status};
 
+use crate::registry::DatasetRegistry;
+use crate::shard_map;
 use crate::tracker::LivenessTracker;
 
 pub struct CoordinatorServiceImpl {
     tracker: LivenessTracker,
+    registry: DatasetRegistry,
 }
 
 impl CoordinatorServiceImpl {
-    pub fn new(tracker: LivenessTracker) -> Self {
-        Self { tracker }
+    pub fn new(tracker: LivenessTracker, registry: DatasetRegistry) -> Self {
+        Self { tracker, registry }
     }
 }
 
@@ -63,6 +66,39 @@ impl CoordinatorService for CoordinatorServiceImpl {
         Ok(Response::new(WorkerReadyResponse {
             accepted: true,
             assigned_worker_id: worker_id,
+        }))
+    }
+
+    async fn register_dataset(
+        &self,
+        request: Request<RegisterDatasetRequest>,
+    ) -> Result<Response<RegisterDatasetResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.uri.is_empty() {
+            return Err(Status::invalid_argument("dataset uri is required"));
+        }
+
+        let alive = self.tracker.alive_worker_ids().await;
+        if alive.is_empty() {
+            return Err(Status::failed_precondition(
+                "no alive workers to assign shards to",
+            ));
+        }
+
+        let assignments = shard_map::compute_shard_map(req.num_shards, &alive)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let dataset_id = self
+            .registry
+            .register(req.job_id, req.uri, req.format, req.num_shards, assignments)
+            .await;
+
+        tracing::info!(dataset_id = %dataset_id, num_shards = req.num_shards, workers = alive.len(), "dataset registered");
+
+        Ok(Response::new(RegisterDatasetResponse {
+            dataset_id,
+            accepted: true,
         }))
     }
 

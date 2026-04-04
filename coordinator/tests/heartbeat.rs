@@ -1,4 +1,4 @@
-use coordinator::{CoordinatorServiceImpl, LivenessTracker};
+use coordinator::{CoordinatorServiceImpl, DatasetRegistry, LivenessTracker};
 use proto_gen::distruntime::coordinator_service_server::CoordinatorServiceServer;
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -13,7 +13,7 @@ async fn start_coordinator(tracker: LivenessTracker) -> (String, tokio::task::Jo
     let addr = listener.local_addr().unwrap();
     let url = format!("http://{addr}");
 
-    let svc = CoordinatorServiceImpl::new(tracker);
+    let svc = CoordinatorServiceImpl::new(tracker, DatasetRegistry::new());
 
     let handle = tokio::spawn(async move {
         Server::builder()
