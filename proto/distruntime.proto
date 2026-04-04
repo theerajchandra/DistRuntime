@@ -1,0 +1,130 @@
+// DistRuntime gRPC Protocol Definitions
+// Version: 0.1.0
+// This file defines the RPC services and messages for coordinator-worker
+// communication in the distributed training runtime.
+
+syntax = "proto3";
+
+package distruntime;
+
+// ---------------------------------------------------------------------------
+// Common types
+// ---------------------------------------------------------------------------
+
+message ShardRange {
+  uint64 start = 1;
+  uint64 end = 2;
+}
+
+message WorkerInfo {
+  string worker_id = 1;
+  string address = 2;
+  uint32 port = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Shard assignment (coordinator -> worker)
+// ---------------------------------------------------------------------------
+
+message AssignShardsRequest {
+  string worker_id = 1;
+  string job_id = 2;
+  repeated ShardRange shards = 3;
+}
+
+message AssignShardsResponse {
+  bool accepted = 1;
+  string message = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Heartbeat (worker -> coordinator)
+// ---------------------------------------------------------------------------
+
+message HeartbeatRequest {
+  string worker_id = 1;
+  uint64 epoch = 2;
+  uint64 step = 3;
+  float throughput_samples_per_sec = 4;
+}
+
+message HeartbeatResponse {
+  bool acknowledged = 1;
+  string directive = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Checkpoint lifecycle
+// ---------------------------------------------------------------------------
+
+message CheckpointBeginRequest {
+  string job_id = 1;
+  uint64 epoch = 2;
+  uint64 step = 3;
+}
+
+message CheckpointBeginResponse {
+  string checkpoint_id = 1;
+  string storage_path = 2;
+}
+
+message CheckpointCommitRequest {
+  string checkpoint_id = 1;
+  string worker_id = 2;
+  uint64 bytes_written = 3;
+}
+
+message CheckpointCommitResponse {
+  bool success = 1;
+}
+
+message CheckpointAbortRequest {
+  string checkpoint_id = 1;
+  string reason = 2;
+}
+
+message CheckpointAbortResponse {
+  bool acknowledged = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Worker lifecycle
+// ---------------------------------------------------------------------------
+
+message WorkerReadyRequest {
+  WorkerInfo info = 1;
+  repeated string capabilities = 2;
+}
+
+message WorkerReadyResponse {
+  bool accepted = 1;
+  string assigned_worker_id = 2;
+}
+
+message RecoverWorkerRequest {
+  string worker_id = 1;
+  string last_checkpoint_id = 2;
+}
+
+message RecoverWorkerResponse {
+  bool can_recover = 1;
+  string checkpoint_path = 2;
+  repeated ShardRange assigned_shards = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Services
+// ---------------------------------------------------------------------------
+
+service CoordinatorService {
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc WorkerReady(WorkerReadyRequest) returns (WorkerReadyResponse);
+  rpc CheckpointBegin(CheckpointBeginRequest) returns (CheckpointBeginResponse);
+  rpc CheckpointCommit(CheckpointCommitRequest) returns (CheckpointCommitResponse);
+  rpc CheckpointAbort(CheckpointAbortRequest) returns (CheckpointAbortResponse);
+  rpc RecoverWorker(RecoverWorkerRequest) returns (RecoverWorkerResponse);
+}
+
+service WorkerService {
+  rpc AssignShards(AssignShardsRequest) returns (AssignShardsResponse);
+}

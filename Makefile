@@ -1,4 +1,4 @@
-.PHONY: build test lint fmt check clean
+.PHONY: build test lint fmt check clean proto
 
 build:
 	cargo build --workspace
@@ -19,3 +19,6 @@ check:
 
 clean:
 	cargo clean
+
+proto:
+	cargo build -p proto-gen
