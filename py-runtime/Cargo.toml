@@ -9,6 +9,9 @@ pyo3.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+data-loader.workspace = true
+bytes.workspace = true
+arrow.workspace = true
 
 [lib]
 crate-type = ["cdylib", "rlib"]

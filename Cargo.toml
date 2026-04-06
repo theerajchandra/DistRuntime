@@ -34,6 +34,9 @@ aws-sdk-s3 = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 tempfile = "3"
 tokio-stream = "0.1"
+csv = "1"
+parquet = "58"
+arrow = "58"
 
 # intra-workspace crates
 coordinator = { path = "coordinator" }
