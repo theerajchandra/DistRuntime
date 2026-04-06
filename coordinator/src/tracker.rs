@@ -4,6 +4,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 
+use crate::registry::DatasetRegistry;
+
 #[derive(Debug, Clone)]
 pub struct WorkerEntry {
     pub worker_id: String,
@@ -79,6 +81,16 @@ impl LivenessTracker {
 
     /// Spawn the background reaper. Returns a handle that can be used to await completion.
     pub fn spawn_reaper(&self) -> JoinHandle<()> {
+        self.spawn_reaper_inner(None)
+    }
+
+    /// Like [`Self::spawn_reaper`], but recomputes dataset shard assignments in the registry
+    /// whenever workers are marked dead (survivors pick up shards).
+    pub fn spawn_reaper_with_registry(&self, registry: DatasetRegistry) -> JoinHandle<()> {
+        self.spawn_reaper_inner(Some(registry))
+    }
+
+    fn spawn_reaper_inner(&self, registry: Option<DatasetRegistry>) -> JoinHandle<()> {
         let inner = Arc::clone(&self.inner);
         let threshold = self.dead_threshold;
         let interval = self.check_interval;
@@ -92,39 +104,76 @@ impl LivenessTracker {
                 }
 
                 let now = Instant::now();
-                let mut state = inner.lock().await;
+                let newly_failed: Vec<(String, Instant)> = {
+                    let mut state = inner.lock().await;
+                    let newly_failed: Vec<(String, Instant)> = state
+                        .workers
+                        .values_mut()
+                        .filter(|e| e.alive && now.duration_since(e.last_seen) > threshold)
+                        .map(|e| {
+                            e.alive = false;
+                            (e.worker_id.clone(), e.last_seen)
+                        })
+                        .collect();
 
-                let newly_failed: Vec<(String, Instant)> = state
-                    .workers
-                    .values_mut()
-                    .filter(|e| e.alive && now.duration_since(e.last_seen) > threshold)
-                    .map(|e| {
-                        e.alive = false;
-                        (e.worker_id.clone(), e.last_seen)
-                    })
-                    .collect();
+                    for (ref id, last_seen) in &newly_failed {
+                        tracing::warn!(
+                            worker_id = %id,
+                            last_seen_ms_ago = now.duration_since(*last_seen).as_millis() as u64,
+                            "WorkerFailed: worker missed heartbeat deadline"
+                        );
+                    }
+                    state.failed_workers.extend(newly_failed.iter().cloned());
+                    newly_failed
+                };
 
-                for (ref id, last_seen) in &newly_failed {
-                    tracing::warn!(
-                        worker_id = %id,
-                        last_seen_ms_ago = now.duration_since(*last_seen).as_millis() as u64,
-                        "WorkerFailed: worker missed heartbeat deadline"
-                    );
+                if !newly_failed.is_empty() {
+                    if let Some(reg) = registry.clone() {
+                        let alive = {
+                            let state = inner.lock().await;
+                            let mut ids: Vec<String> = state
+                                .workers
+                                .values()
+                                .filter(|e| e.alive)
+                                .map(|e| e.worker_id.clone())
+                                .collect();
+                            ids.sort();
+                            ids
+                        };
+                        if alive.is_empty() {
+                            tracing::warn!("no alive workers after failure; skipping rebalance");
+                        } else {
+                            let start = Instant::now();
+                            match reg.rebalance_all(&alive).await {
+                                Ok(()) => {
+                                    tracing::info!(
+                                        elapsed_ms = start.elapsed().as_millis() as u64,
+                                        failed = ?newly_failed.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                                        "rebalanced dataset shard assignments after worker failure"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::error!(error = %e, "rebalance after worker failure failed");
+                                }
+                            }
+                        }
+                    }
                 }
-                state.failed_workers.extend(newly_failed);
             }
         })
     }
 
-    /// Returns the IDs of all workers currently marked alive.
+    /// Returns the IDs of all workers currently marked alive (sorted for stable shard maps).
     pub async fn alive_worker_ids(&self) -> Vec<String> {
         let state = self.inner.lock().await;
-        state
+        let mut ids: Vec<String> = state
             .workers
             .values()
             .filter(|e| e.alive)
             .map(|e| e.worker_id.clone())
-            .collect()
+            .collect();
+        ids.sort();
+        ids
     }
 
     pub fn shutdown(&self) {

@@ -1,9 +1,10 @@
 use proto_gen::distruntime::coordinator_service_server::CoordinatorService;
 use proto_gen::distruntime::{
     CheckpointAbortRequest, CheckpointAbortResponse, CheckpointBeginRequest,
-    CheckpointBeginResponse, CheckpointCommitRequest, CheckpointCommitResponse, HeartbeatRequest,
-    HeartbeatResponse, RecoverWorkerRequest, RecoverWorkerResponse, RegisterDatasetRequest,
-    RegisterDatasetResponse, WorkerReadyRequest, WorkerReadyResponse,
+    CheckpointBeginResponse, CheckpointCommitRequest, CheckpointCommitResponse,
+    DatasetShardAssignment, HeartbeatRequest, HeartbeatResponse, RecoverWorkerRequest,
+    RecoverWorkerResponse, RegisterDatasetRequest, RegisterDatasetResponse, WorkerReadyRequest,
+    WorkerReadyResponse,
 };
 use tonic::{Request, Response, Status};
 
@@ -36,9 +37,18 @@ impl CoordinatorService for CoordinatorServiceImpl {
                 req.worker_id
             )));
         }
+
+        let (generation, rows) = self.registry.assignments_for_worker(&req.worker_id).await;
+        let assignments: Vec<DatasetShardAssignment> = rows
+            .into_iter()
+            .map(|(dataset_id, shards)| DatasetShardAssignment { dataset_id, shards })
+            .collect();
+
         Ok(Response::new(HeartbeatResponse {
             acknowledged: true,
             directive: String::new(),
+            assignments,
+            rebalance_generation: generation,
         }))
     }
 

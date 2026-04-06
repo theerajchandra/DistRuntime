@@ -48,9 +48,19 @@ message HeartbeatRequest {
   float throughput_samples_per_sec = 4;
 }
 
+// Current shard ranges for one dataset assigned to this worker (after registration / rebalance).
+message DatasetShardAssignment {
+  string dataset_id = 1;
+  repeated ShardRange shards = 2;
+}
+
 message HeartbeatResponse {
   bool acknowledged = 1;
   string directive = 2;
+  // Full snapshot of this worker's shard assignments per dataset (for hot-swap).
+  repeated DatasetShardAssignment assignments = 3;
+  // Increments each time the coordinator recomputes assignments after a worker failure.
+  uint64 rebalance_generation = 4;
 }
 
 // ---------------------------------------------------------------------------

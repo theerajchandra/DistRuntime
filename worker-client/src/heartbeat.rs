@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
 use proto_gen::distruntime::coordinator_service_client::CoordinatorServiceClient;
-use proto_gen::distruntime::{HeartbeatRequest, WorkerInfo, WorkerReadyRequest};
+use proto_gen::distruntime::{
+    DatasetShardAssignment, HeartbeatRequest, WorkerInfo, WorkerReadyRequest,
+};
 use std::time::Duration;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tonic::transport::Channel;
 
@@ -11,6 +14,7 @@ pub struct WorkerClient {
     client: CoordinatorServiceClient<Channel>,
     worker_id: String,
     heartbeat_interval: Duration,
+    assignment_tx: watch::Sender<(u64, Vec<DatasetShardAssignment>)>,
 }
 
 impl WorkerClient {
@@ -26,11 +30,20 @@ impl WorkerClient {
             .await
             .with_context(|| format!("failed to connect to coordinator at {coordinator_addr}"))?;
 
+        let (assignment_tx, _) = watch::channel((0u64, vec![]));
+
         Ok(Self {
             client,
             worker_id: String::new(),
             heartbeat_interval,
+            assignment_tx,
         })
+    }
+
+    /// Subscribe to shard assignment snapshots pushed on every successful heartbeat.
+    /// Hot-swap readers when [`DatasetShardAssignment`] or generation changes.
+    pub fn assignment_watch(&self) -> watch::Receiver<(u64, Vec<DatasetShardAssignment>)> {
+        self.assignment_tx.subscribe()
     }
 
     /// Register this worker with the coordinator. Returns the assigned worker ID.
@@ -64,6 +77,7 @@ impl WorkerClient {
         let mut client = self.client.clone();
         let worker_id = self.worker_id.clone();
         let interval = self.heartbeat_interval;
+        let assignment_tx = self.assignment_tx.clone();
 
         let handle = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
@@ -76,7 +90,9 @@ impl WorkerClient {
                     throughput_samples_per_sec: 0.0,
                 };
                 match client.heartbeat(req).await {
-                    Ok(_) => {
+                    Ok(resp) => {
+                        let inner = resp.into_inner();
+                        let _ = assignment_tx.send((inner.rebalance_generation, inner.assignments));
                         tracing::trace!(worker_id = %worker_id, "heartbeat acknowledged");
                     }
                     Err(e) => {

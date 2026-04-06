@@ -6,6 +6,8 @@ use tokio::sync::Mutex;
 use proto_gen::distruntime::ShardRange;
 use serde::{Deserialize, Serialize};
 
+use crate::shard_map::{self, ComputeError};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedShardRange {
     start: u64,
@@ -44,6 +46,8 @@ struct PersistedDataset {
 struct PersistedState {
     datasets: HashMap<String, PersistedDataset>,
     counter: u64,
+    #[serde(default)]
+    rebalance_generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +75,7 @@ pub struct DatasetRegistry {
 struct RegistryState {
     datasets: HashMap<String, Dataset>,
     counter: u64,
+    rebalance_generation: u64,
 }
 
 impl DatasetRegistry {
@@ -79,6 +84,7 @@ impl DatasetRegistry {
             inner: Arc::new(Mutex::new(RegistryState {
                 datasets: HashMap::new(),
                 counter: 0,
+                rebalance_generation: 0,
             })),
             persist_path: None,
         }
@@ -88,14 +94,18 @@ impl DatasetRegistry {
     /// If the file exists, state is loaded from it.
     pub fn with_persistence(path: impl Into<PathBuf>) -> anyhow::Result<Self> {
         let path = path.into();
-        let (datasets, counter) = if path.exists() {
+        let (datasets, counter, rebalance_generation) = if path.exists() {
             Self::load_from_file(&path)?
         } else {
-            (HashMap::new(), 0)
+            (HashMap::new(), 0, 0)
         };
 
         Ok(Self {
-            inner: Arc::new(Mutex::new(RegistryState { datasets, counter })),
+            inner: Arc::new(Mutex::new(RegistryState {
+                datasets,
+                counter,
+                rebalance_generation,
+            })),
             persist_path: Some(path),
         })
     }
@@ -133,6 +143,49 @@ impl DatasetRegistry {
         dataset_id
     }
 
+    /// Recompute shard assignments for every dataset using only `alive_workers` (sorted).
+    /// Increments `rebalance_generation`. Used after worker failure detection.
+    pub async fn rebalance_all(&self, alive_workers: &[String]) -> Result<(), ComputeError> {
+        if alive_workers.is_empty() {
+            return Err(ComputeError::NoWorkers);
+        }
+        let mut sorted = alive_workers.to_vec();
+        sorted.sort();
+        let mut state = self.inner.lock().await;
+        state.rebalance_generation += 1;
+        for ds in state.datasets.values_mut() {
+            ds.assignments = shard_map::compute_shard_map(ds.num_shards, &sorted)?;
+        }
+        if let Some(ref path) = self.persist_path {
+            if let Err(e) = Self::save_to_file(path, &state) {
+                tracing::error!(error = %e, "failed to persist dataset registry after rebalance");
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn rebalance_generation(&self) -> u64 {
+        let state = self.inner.lock().await;
+        state.rebalance_generation
+    }
+
+    /// Snapshot of this worker's shard ranges per dataset, and the current rebalance generation.
+    pub async fn assignments_for_worker(
+        &self,
+        worker_id: &str,
+    ) -> (u64, Vec<(String, Vec<ShardRange>)>) {
+        let state = self.inner.lock().await;
+        let gen = state.rebalance_generation;
+        let mut rows: Vec<(String, Vec<ShardRange>)> = Vec::new();
+        for ds in state.datasets.values() {
+            if let Some(ranges) = ds.assignments.get(worker_id) {
+                rows.push((ds.dataset_id.clone(), ranges.clone()));
+            }
+        }
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        (gen, rows)
+    }
+
     pub async fn get(&self, dataset_id: &str) -> Option<Dataset> {
         let state = self.inner.lock().await;
         state.datasets.get(dataset_id).cloned()
@@ -150,6 +203,7 @@ impl DatasetRegistry {
 
     fn save_to_file(path: &Path, state: &RegistryState) -> anyhow::Result<()> {
         let persisted = PersistedState {
+            rebalance_generation: state.rebalance_generation,
             datasets: state
                 .datasets
                 .iter()
@@ -181,7 +235,7 @@ impl DatasetRegistry {
         Ok(())
     }
 
-    fn load_from_file(path: &Path) -> anyhow::Result<(HashMap<String, Dataset>, u64)> {
+    fn load_from_file(path: &Path) -> anyhow::Result<(HashMap<String, Dataset>, u64, u64)> {
         let json = std::fs::read_to_string(path)?;
         let persisted: PersistedState = serde_json::from_str(&json)?;
 
@@ -205,7 +259,7 @@ impl DatasetRegistry {
             })
             .collect();
 
-        Ok((datasets, persisted.counter))
+        Ok((datasets, persisted.counter, persisted.rebalance_generation))
     }
 }
 
