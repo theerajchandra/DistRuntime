@@ -12,6 +12,7 @@ tracing.workspace = true
 data-loader.workspace = true
 bytes.workspace = true
 arrow.workspace = true
+serde_json.workspace = true
 
 [lib]
 crate-type = ["cdylib", "rlib"]

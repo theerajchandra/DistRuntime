@@ -3,30 +3,12 @@ use bytes::Bytes;
 
 const DEFAULT_PREFETCH_DEPTH: usize = 64;
 
-/// Supported deserialization formats for shard data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecordFormat {
-    RawBytes,
-    Csv,
-    Parquet,
-}
-
-impl RecordFormat {
-    pub fn from_str_loose(s: &str) -> Option<Self> {
-        match s.to_ascii_lowercase().as_str() {
-            "raw" | "raw_bytes" | "bytes" => Some(Self::RawBytes),
-            "csv" => Some(Self::Csv),
-            "parquet" => Some(Self::Parquet),
-            _ => None,
-        }
-    }
-}
-
 /// A single record yielded by the shard reader.
 #[derive(Debug, Clone)]
 pub enum Record {
     RawBytes(Bytes),
-    CsvRow(Vec<String>),
+    /// One JSON value from a newline-delimited JSON shard.
+    JsonValue(serde_json::Value),
     ParquetBatch(RecordBatch),
 }
 

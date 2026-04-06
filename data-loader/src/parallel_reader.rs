@@ -1,9 +1,11 @@
 use anyhow::Result;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::file_reader::FileReader;
-use crate::record::{prefetch_depth, Record, RecordFormat};
+use crate::format_plugin::{BuiltinFormat, RecordFormatPlugin};
+use crate::record::{prefetch_depth, Record};
 use crate::shard_reader::ShardReader;
 use crate::stream::ByteStream;
 
@@ -29,16 +31,25 @@ impl ShardDescriptor {
 }
 
 impl ParallelShardReader {
-    /// Create a reader that processes local-file shards in parallel.
+    /// Create a reader that processes local-file shards in parallel using a built-in format.
     ///
     /// Prefetch depth is read from the `PREFETCH_DEPTH` env var (default 64).
-    pub fn open(desc: ShardDescriptor, format: RecordFormat) -> Self {
-        Self::open_with_prefetch(desc, format, prefetch_depth())
+    pub fn open(desc: ShardDescriptor, format: BuiltinFormat) -> Self {
+        Self::open_plugin(desc, Arc::new(format), prefetch_depth())
     }
 
     pub fn open_with_prefetch(
         desc: ShardDescriptor,
-        format: RecordFormat,
+        format: BuiltinFormat,
+        prefetch: usize,
+    ) -> Self {
+        Self::open_plugin(desc, Arc::new(format), prefetch)
+    }
+
+    /// Create a reader with an arbitrary [`RecordFormatPlugin`] (including custom types).
+    pub fn open_plugin(
+        desc: ShardDescriptor,
+        plugin: Arc<dyn RecordFormatPlugin>,
         prefetch: usize,
     ) -> Self {
         let (tx, rx) = mpsc::channel(prefetch.max(1));
@@ -46,9 +57,10 @@ impl ParallelShardReader {
         for &idx in &desc.shard_indices {
             let path = desc.shard_path(idx);
             let tx = tx.clone();
+            let plugin = plugin.clone();
 
             tokio::spawn(async move {
-                let result = Self::read_shard(path, format).await;
+                let result = Self::read_shard(path, plugin).await;
                 match result {
                     Ok(records) => {
                         for r in records {
@@ -68,19 +80,19 @@ impl ParallelShardReader {
     }
 
     /// Create a reader from an arbitrary list of `ByteStream` sources.
-    /// Useful for S3 shards or test mocks.
     pub fn from_streams(
         streams: Vec<Box<dyn ByteStream>>,
-        format: RecordFormat,
+        plugin: Arc<dyn RecordFormatPlugin>,
         prefetch: usize,
     ) -> Self {
         let (tx, rx) = mpsc::channel(prefetch.max(1));
 
         for stream in streams {
             let tx = tx.clone();
+            let plugin = plugin.clone();
 
             tokio::spawn(async move {
-                match ShardReader::load(stream, format).await {
+                match ShardReader::load(stream, plugin).await {
                     Ok(mut reader) => {
                         while let Some(r) = reader.next_record() {
                             if tx.send(Ok(r)).await.is_err() {
@@ -103,9 +115,9 @@ impl ParallelShardReader {
         self.rx.recv().await
     }
 
-    async fn read_shard(path: PathBuf, format: RecordFormat) -> Result<Vec<Record>> {
+    async fn read_shard(path: PathBuf, plugin: Arc<dyn RecordFormatPlugin>) -> Result<Vec<Record>> {
         let stream: Box<dyn ByteStream> = Box::new(FileReader::open(&path).await?);
-        let mut reader = ShardReader::load(stream, format).await?;
+        let mut reader = ShardReader::load(stream, plugin).await?;
         let mut records = Vec::new();
         while let Some(r) = reader.next_record() {
             records.push(r);

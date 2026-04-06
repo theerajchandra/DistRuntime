@@ -1,4 +1,7 @@
-use data_loader::{ParallelShardReader, Record, RecordFormat, ShardDescriptor};
+use arrow::array::Int64Array;
+use arrow::record_batch::RecordBatch;
+use data_loader::file_reader::FileReader;
+use data_loader::{BuiltinFormat, ParallelShardReader, Record, ShardDescriptor, ShardReader};
 use std::collections::HashSet;
 use std::io::Write;
 use tempfile::TempDir;
@@ -20,18 +23,18 @@ fn create_shard_files(
     }
 }
 
-fn create_csv_shard_files(
+fn create_ndjson_shard_files(
     dir: &std::path::Path,
     num_shards: u64,
     rows_per_shard: usize,
     id_offset: u64,
 ) {
     for shard in 0..num_shards {
-        let path = dir.join(format!("shard-{shard}.csv"));
+        let path = dir.join(format!("shard-{shard}.ndjson"));
         let mut f = std::fs::File::create(path).unwrap();
         for row in 0..rows_per_shard {
             let id = id_offset + shard * rows_per_shard as u64 + row as u64;
-            writeln!(f, "{id},value-{id}").unwrap();
+            writeln!(f, "{{\"id\":{id}}}").unwrap();
         }
     }
 }
@@ -42,9 +45,7 @@ fn create_parquet_shard_files(
     rows_per_shard: usize,
     id_offset: u64,
 ) {
-    use arrow::array::Int64Array;
     use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
     use std::sync::Arc;
 
@@ -93,7 +94,7 @@ async fn ten_workers_no_drop_no_dup() {
                 shard_indices: indices,
             };
             let mut reader =
-                ParallelShardReader::open_with_prefetch(desc, RecordFormat::RawBytes, 8);
+                ParallelShardReader::open_with_prefetch(desc, BuiltinFormat::RawBytes, 8);
 
             let mut ids = Vec::new();
             while let Some(Ok(Record::RawBytes(b))) = reader.next_record().await {
@@ -124,7 +125,6 @@ async fn ten_workers_no_drop_no_dup() {
     );
 }
 
-/// Verify that PREFETCH_DEPTH env var is respected.
 #[tokio::test]
 async fn prefetch_depth_from_env() {
     let tmp = TempDir::new().unwrap();
@@ -138,7 +138,7 @@ async fn prefetch_depth_from_env() {
         shard_indices: vec![0, 1],
     };
 
-    let mut reader = ParallelShardReader::open(desc, RecordFormat::RawBytes);
+    let mut reader = ParallelShardReader::open(desc, BuiltinFormat::RawBytes);
 
     let mut count = 0;
     while let Some(Ok(_)) = reader.next_record().await {
@@ -149,68 +149,91 @@ async fn prefetch_depth_from_env() {
     unsafe { std::env::remove_var("PREFETCH_DEPTH") };
 }
 
-/// Raw bytes round-trip: each line from the shard should be returned as-is.
+/// Raw bytes: round-trip — re-join lines and compare to normalized file content.
 #[tokio::test]
-async fn format_raw_bytes() {
+async fn round_trip_raw_bytes() {
     let tmp = TempDir::new().unwrap();
     create_shard_files(tmp.path(), "dat", 1, 4, 100);
 
-    let desc = ShardDescriptor {
-        base_dir: tmp.path().to_path_buf(),
-        extension: "dat".to_string(),
-        shard_indices: vec![0],
-    };
-    let mut reader = ParallelShardReader::open_with_prefetch(desc, RecordFormat::RawBytes, 8);
+    let path = tmp.path().join("shard-0.dat");
+    let expected = std::fs::read_to_string(&path).unwrap();
+    let expected = expected.trim_end().to_string();
+
+    let stream: Box<dyn data_loader::ByteStream> = Box::new(FileReader::open(&path).await.unwrap());
+    let mut reader = ShardReader::load_builtin(stream, BuiltinFormat::RawBytes)
+        .await
+        .unwrap();
+
+    let mut lines = Vec::new();
+    while let Some(Record::RawBytes(b)) = reader.next_record() {
+        lines.push(String::from_utf8_lossy(&b).to_string());
+    }
+    lines.sort();
+    let joined = lines.join("\n");
+    assert_eq!(joined, expected);
+}
+
+/// NDJSON: round-trip — parsed ids match source lines.
+#[tokio::test]
+async fn round_trip_ndjson() {
+    let tmp = TempDir::new().unwrap();
+    create_ndjson_shard_files(tmp.path(), 1, 3, 200);
+
+    let path = tmp.path().join("shard-0.ndjson");
+
+    let stream: Box<dyn data_loader::ByteStream> = Box::new(FileReader::open(&path).await.unwrap());
+    let mut reader = ShardReader::load_builtin(stream, BuiltinFormat::Ndjson)
+        .await
+        .unwrap();
 
     let mut ids = Vec::new();
-    while let Some(Ok(Record::RawBytes(b))) = reader.next_record().await {
-        ids.push(String::from_utf8_lossy(&b).to_string());
+    while let Some(Record::JsonValue(v)) = reader.next_record() {
+        ids.push(v["id"].as_i64().unwrap());
     }
-    ids.sort();
-    assert_eq!(ids, vec!["100", "101", "102", "103"]);
+    ids.sort_unstable();
+    assert_eq!(ids, vec![200, 201, 202]);
 }
 
-/// CSV row parsing: each row yields a `CsvRow` with fields.
+/// Parquet: round-trip row counts and column values.
 #[tokio::test]
-async fn format_csv() {
-    let tmp = TempDir::new().unwrap();
-    create_csv_shard_files(tmp.path(), 1, 3, 200);
-
-    let desc = ShardDescriptor {
-        base_dir: tmp.path().to_path_buf(),
-        extension: "csv".to_string(),
-        shard_indices: vec![0],
-    };
-    let mut reader = ParallelShardReader::open_with_prefetch(desc, RecordFormat::Csv, 8);
-
-    let mut rows = Vec::new();
-    while let Some(Ok(Record::CsvRow(fields))) = reader.next_record().await {
-        rows.push(fields);
-    }
-    rows.sort();
-    assert_eq!(rows.len(), 3);
-    assert_eq!(rows[0], vec!["200", "value-200"]);
-    assert_eq!(rows[1], vec!["201", "value-201"]);
-    assert_eq!(rows[2], vec!["202", "value-202"]);
-}
-
-/// Parquet deserialization: each batch should contain the correct rows.
-#[tokio::test]
-async fn format_parquet() {
+async fn round_trip_parquet() {
     let tmp = TempDir::new().unwrap();
     create_parquet_shard_files(tmp.path(), 1, 5, 300);
 
+    let path = tmp.path().join("shard-0.parquet");
+    let stream: Box<dyn data_loader::ByteStream> = Box::new(FileReader::open(&path).await.unwrap());
+    let mut reader = ShardReader::load_builtin(stream, BuiltinFormat::Parquet)
+        .await
+        .unwrap();
+
+    let mut all_ids: Vec<i64> = Vec::new();
+    while let Some(Record::ParquetBatch(batch)) = reader.next_record() {
+        let col = batch.column(0);
+        let arr = col.as_any().downcast_ref::<Int64Array>().unwrap();
+        for i in 0..arr.len() {
+            all_ids.push(arr.value(i));
+        }
+    }
+    all_ids.sort_unstable();
+    assert_eq!(all_ids, vec![300, 301, 302, 303, 304]);
+}
+
+#[tokio::test]
+async fn format_ndjson_parallel() {
+    let tmp = TempDir::new().unwrap();
+    create_ndjson_shard_files(tmp.path(), 1, 3, 10);
+
     let desc = ShardDescriptor {
         base_dir: tmp.path().to_path_buf(),
-        extension: "parquet".to_string(),
+        extension: "ndjson".to_string(),
         shard_indices: vec![0],
     };
-    let mut reader = ParallelShardReader::open_with_prefetch(desc, RecordFormat::Parquet, 8);
+    let mut reader = ParallelShardReader::open_with_prefetch(desc, BuiltinFormat::Ndjson, 8);
 
-    let mut total_rows = 0;
-    while let Some(Ok(Record::ParquetBatch(batch))) = reader.next_record().await {
-        total_rows += batch.num_rows();
-        assert_eq!(batch.num_columns(), 1);
+    let mut ids = Vec::new();
+    while let Some(Ok(Record::JsonValue(v))) = reader.next_record().await {
+        ids.push(v["id"].as_i64().unwrap());
     }
-    assert_eq!(total_rows, 5);
+    ids.sort_unstable();
+    assert_eq!(ids, vec![10, 11, 12]);
 }
