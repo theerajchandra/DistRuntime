@@ -1,4 +1,4 @@
-use coordinator::{CoordinatorServiceImpl, DatasetRegistry, LivenessTracker};
+use coordinator::{compute_shard_map, CoordinatorServiceImpl, DatasetRegistry, LivenessTracker};
 use proto_gen::distruntime::coordinator_service_client::CoordinatorServiceClient;
 use proto_gen::distruntime::coordinator_service_server::CoordinatorServiceServer;
 use proto_gen::distruntime::{RegisterDatasetRequest, WorkerInfo, WorkerReadyRequest};
@@ -93,6 +93,60 @@ async fn register_dataset_via_grpc() {
     assert_eq!(datasets[0].dataset_id, resp.dataset_id);
 
     server_handle.abort();
+}
+
+#[tokio::test]
+async fn registry_survives_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("registry.json");
+
+    let worker_ids: Vec<String> = (0..4).map(|i| format!("w{i}")).collect();
+    let assignments = compute_shard_map(20, &worker_ids).unwrap();
+
+    // Register a dataset with persistence enabled.
+    {
+        let registry = DatasetRegistry::with_persistence(&path).unwrap();
+        let ds_id = registry
+            .register(
+                "job-1".into(),
+                "s3://bucket/data/".into(),
+                "parquet".into(),
+                20,
+                assignments,
+            )
+            .await;
+        assert_eq!(ds_id, "ds-00000001");
+    }
+
+    // Simulate a restart by creating a new registry from the same file.
+    {
+        let registry = DatasetRegistry::with_persistence(&path).unwrap();
+        let ds = registry.get("ds-00000001").await.unwrap();
+        assert_eq!(ds.job_id, "job-1");
+        assert_eq!(ds.uri, "s3://bucket/data/");
+        assert_eq!(ds.num_shards, 20);
+        assert_eq!(ds.assignments.len(), 4);
+
+        let total: u64 = ds
+            .assignments
+            .values()
+            .flat_map(|r| r.iter())
+            .map(|r| r.end - r.start)
+            .sum();
+        assert_eq!(total, 20);
+
+        // Counter should continue from where it left off.
+        let ds_id2 = registry
+            .register(
+                "job-2".into(),
+                "s3://bucket/more/".into(),
+                "csv".into(),
+                5,
+                compute_shard_map(5, &worker_ids).unwrap(),
+            )
+            .await;
+        assert_eq!(ds_id2, "ds-00000002");
+    }
 }
 
 #[tokio::test]

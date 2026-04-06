@@ -1,4 +1,5 @@
 use coordinator::compute_shard_map;
+use std::time::Instant;
 
 fn worker_ids(n: usize) -> Vec<String> {
     (0..n).map(|i| format!("w{i}")).collect()
@@ -83,6 +84,21 @@ fn one_shard() {
         .sum();
     assert_eq!(total, 1);
     assert_covers_all(1, &map);
+}
+
+#[test]
+fn thousand_shards_under_500ms() {
+    let ids = worker_ids(64);
+    let start = Instant::now();
+    let map = compute_shard_map(1000, &ids).unwrap();
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 500,
+        "1000-shard map took {}ms, expected < 500ms",
+        elapsed.as_millis()
+    );
+    assert_covers_all(1000, &map);
 }
 
 fn assert_covers_all(
