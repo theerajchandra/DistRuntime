@@ -64,24 +64,36 @@ jobs:
         run: cargo test --workspace
 
   wheel:
-    name: Build wheel
+    name: Build wheel (${{ matrix.target }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        target: [x86_64, aarch64]
+        include:
+          - target: x86_64
+            manylinux: auto
+          # manylinux2014 cross GCC is too old for aws-lc-sys (C11/stdatomic, -march armv8.4) and
+          # ring's AArch64 asm needs __ARM_ARCH when preprocessing .S files.
+          - target: aarch64
+            manylinux: "2_28"
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Build wheel
         uses: PyO3/maturin-action@v1
+        env:
+          CFLAGS_aarch64_unknown_linux_gnu: -D__ARM_ARCH=8
+          CXXFLAGS_aarch64_unknown_linux_gnu: -D__ARM_ARCH=8
         with:
           target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          # Pass through to the cross-compilation container (required for ring + aws-lc-sys on aarch64).
+          docker-options: ${{ matrix.target == 'aarch64' && '-e CFLAGS_aarch64_unknown_linux_gnu=-D__ARM_ARCH=8 -e CXXFLAGS_aarch64_unknown_linux_gnu=-D__ARM_ARCH=8' || '' }}
           args: --release --out dist -m py-runtime/Cargo.toml -i python3.12
-          manylinux: auto
           before-script-linux: |
             apt-get update && apt-get install -y protobuf-compiler || yum install -y protobuf-compiler || true
 
