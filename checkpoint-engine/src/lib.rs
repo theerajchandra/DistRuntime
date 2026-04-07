@@ -21,18 +21,12 @@ enum CheckpointPhase {
         expected_workers: HashSet<String>,
         committed: HashMap<String, u64>, // worker_id -> bytes_written
     },
-    Committed {
-        total_bytes: u64,
-    },
-    Aborted {
-        reason: String,
-    },
+    Committed,
 }
 
 // ── Session (private) ─────────────────────────────────────────────────────────
 
 struct CheckpointSession {
-    checkpoint_id: String,
     job_id: String,
     epoch: u64,
     step: u64,
@@ -82,7 +76,6 @@ impl CheckpointEngine {
         let storage_path = format!("checkpoints/{checkpoint_id}");
 
         let session = CheckpointSession {
-            checkpoint_id: checkpoint_id.clone(),
             job_id: job_id.to_string(),
             epoch,
             step,
@@ -153,10 +146,13 @@ impl CheckpointEngine {
             Action::Done(total_bytes) => {
                 tracing::info!(
                     checkpoint_id,
+                    job_id = %session.job_id,
+                    epoch = session.epoch,
+                    step = session.step,
                     total_bytes,
                     "checkpoint fully committed"
                 );
-                session.phase = CheckpointPhase::Committed { total_bytes };
+                session.phase = CheckpointPhase::Committed;
                 Ok(true)
             }
         }
@@ -177,13 +173,18 @@ impl CheckpointEngine {
         match sessions.get(checkpoint_id) {
             None => return false,
             Some(session) => {
-                if let CheckpointPhase::Committed { .. } = &session.phase {
+                if let CheckpointPhase::Committed = &session.phase {
                     return false;
                 }
+                tracing::warn!(
+                    checkpoint_id,
+                    job_id = %session.job_id,
+                    storage_path = %session.storage_path,
+                    reason,
+                    "checkpoint aborted"
+                );
             }
         }
-
-        tracing::warn!(checkpoint_id, reason, "checkpoint aborted");
 
         // Remove from map — this is the "no partial data" guarantee.
         // In a real system we would also delete the files under storage_path.
