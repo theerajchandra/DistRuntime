@@ -72,9 +72,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -83,8 +80,10 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist -m py-runtime/Cargo.toml
+          args: --release --out dist -m py-runtime/Cargo.toml -i python3.12
           manylinux: auto
+          before-script-linux: |
+            apt-get update && apt-get install -y protobuf-compiler || yum install -y protobuf-compiler || true
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4
