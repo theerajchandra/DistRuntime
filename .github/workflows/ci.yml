@@ -94,8 +94,27 @@ jobs:
           # Pass through to the cross-compilation container (required for ring + aws-lc-sys on aarch64).
           docker-options: ${{ matrix.target == 'aarch64' && '-e CFLAGS_aarch64_unknown_linux_gnu=-D__ARM_ARCH=8 -e CXXFLAGS_aarch64_unknown_linux_gnu=-D__ARM_ARCH=8' || '' }}
           args: --release --out dist -m py-runtime/Cargo.toml -i python3.12
+          # Distro packages in manylinux images are often ancient protoc (proto2-only). proto-gen needs proto3.
           before-script-linux: |
-            apt-get update && apt-get install -y protobuf-compiler || yum install -y protobuf-compiler || true
+            set -euxo pipefail
+            if command -v apt-get >/dev/null 2>&1; then
+              apt-get update && apt-get install -y curl unzip ca-certificates
+            elif command -v yum >/dev/null 2>&1; then
+              yum install -y curl unzip ca-certificates
+            else
+              echo "No apt-get or yum"; exit 1
+            fi
+            PB_VERSION=25.1
+            case "${{ matrix.target }}" in
+              x86_64) PB_ARCH=linux-x86_64 ;;
+              aarch64) PB_ARCH=linux-aarch_64 ;;
+              *) echo "unknown matrix.target"; exit 1 ;;
+            esac
+            curl -sSL "https://github.com/protocolbuffers/protobuf/releases/download/v${PB_VERSION}/protoc-${PB_VERSION}-${PB_ARCH}.zip" -o /tmp/protoc.zip
+            unzip -o /tmp/protoc.zip -d /usr/local
+            chmod +x /usr/local/bin/protoc
+            export PATH="/usr/local/bin:$PATH"
+            protoc --version
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4
