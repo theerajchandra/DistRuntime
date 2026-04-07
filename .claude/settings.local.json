@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:support.atlassian.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(claude mcp:*)",
+      "Bash(security find-generic-password:*)",
+      "Bash(claude --debug mcp list)",
+      "Bash(node -e \" const fs = require\\('fs'\\); const code = fs.readFileSync\\('/Users/theerajchandra/.nvm/versions/node/v22.17.1/lib/node_modules/@anthropic-ai/claude-code/cli.js', 'utf8'\\); // Search for what creates the SSE transport ['SSEClientTransport','SseClientTransport','sseClient','createTransport','mcpTransport','mcp.*transport'].forEach\\(term => { const re = new RegExp\\(term, 'g'\\); let m; let count = 0; while\\(\\(m = re.exec\\(code\\)\\) !== null && count < 3\\) { count++; console.log\\('=== Found:', term, 'at', m.index, '==='\\); console.log\\(code.slice\\(m.index - 200, m.index + 400\\)\\); console.log\\('---'\\); } }\\); \")",
+      "Bash(node:*)",
+      "mcp__atlassian__getAccessibleAtlassianResources",
+      "mcp__atlassian__getJiraIssue",
+      "Bash(cargo check:*)",
+      "Read(//usr/local/bin/**)",
+      "Read(//opt/homebrew/bin/**)",
+      "Bash(command -v rustup)",
+      "Bash(cargo test:*)",
+      "Bash(~/.cargo/bin/cargo test:*)",
+      "Bash(export PATH=\"$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH\")",
+      "Bash(cargo build:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo fmt:*)"
+    ]
+  }
+}

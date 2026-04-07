@@ -13,7 +13,11 @@ async fn start_coordinator(tracker: LivenessTracker) -> (String, tokio::task::Jo
     let addr = listener.local_addr().unwrap();
     let url = format!("http://{addr}");
 
-    let svc = CoordinatorServiceImpl::new(tracker, DatasetRegistry::new(), checkpoint_engine::CheckpointEngine::new());
+    let svc = CoordinatorServiceImpl::new(
+        tracker,
+        DatasetRegistry::new(),
+        checkpoint_engine::CheckpointEngine::new(),
+    );
 
     let handle = tokio::spawn(async move {
         Server::builder()

@@ -21,8 +21,16 @@ pub struct CoordinatorServiceImpl {
 }
 
 impl CoordinatorServiceImpl {
-    pub fn new(tracker: LivenessTracker, registry: DatasetRegistry, checkpoint_engine: CheckpointEngine) -> Self {
-        Self { tracker, registry, checkpoint_engine }
+    pub fn new(
+        tracker: LivenessTracker,
+        registry: DatasetRegistry,
+        checkpoint_engine: CheckpointEngine,
+    ) -> Self {
+        Self {
+            tracker,
+            registry,
+            checkpoint_engine,
+        }
     }
 }
 
@@ -122,14 +130,19 @@ impl CoordinatorService for CoordinatorServiceImpl {
         let req = request.into_inner();
         let alive = self.tracker.alive_worker_ids().await;
         if alive.is_empty() {
-            return Err(Status::failed_precondition("no alive workers for checkpoint"));
+            return Err(Status::failed_precondition(
+                "no alive workers for checkpoint",
+            ));
         }
         let (checkpoint_id, storage_path) = self
             .checkpoint_engine
             .begin(&req.job_id, req.epoch, req.step, alive)
             .await;
         tracing::info!(checkpoint_id = %checkpoint_id, job_id = %req.job_id, epoch = req.epoch, step = req.step, "checkpoint begun");
-        Ok(Response::new(CheckpointBeginResponse { checkpoint_id, storage_path }))
+        Ok(Response::new(CheckpointBeginResponse {
+            checkpoint_id,
+            storage_path,
+        }))
     }
 
     async fn checkpoint_commit(
@@ -146,7 +159,9 @@ impl CoordinatorService for CoordinatorServiceImpl {
                 CheckpointError::InvalidState(_) => Status::failed_precondition(e.to_string()),
                 CheckpointError::AlreadyCommitted(_) => Status::already_exists(e.to_string()),
             })?;
-        Ok(Response::new(CheckpointCommitResponse { success: all_done }))
+        Ok(Response::new(CheckpointCommitResponse {
+            success: all_done,
+        }))
     }
 
     async fn checkpoint_abort(
@@ -154,7 +169,10 @@ impl CoordinatorService for CoordinatorServiceImpl {
         request: Request<CheckpointAbortRequest>,
     ) -> Result<Response<CheckpointAbortResponse>, Status> {
         let req = request.into_inner();
-        let acknowledged = self.checkpoint_engine.abort(&req.checkpoint_id, &req.reason).await;
+        let acknowledged = self
+            .checkpoint_engine
+            .abort(&req.checkpoint_id, &req.reason)
+            .await;
         Ok(Response::new(CheckpointAbortResponse { acknowledged }))
     }
 

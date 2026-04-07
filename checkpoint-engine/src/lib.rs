@@ -115,7 +115,7 @@ impl CheckpointEngine {
         // Determine what to do while the borrow of `session.phase` is live,
         // then apply the phase transition (if any) after the borrow ends.
         enum Action {
-            Done(u64),   // all workers committed; carry total_bytes
+            Done(u64), // all workers committed; carry total_bytes
             Pending,
             Err(CheckpointError),
         }
@@ -208,9 +208,8 @@ mod tests {
     #[tokio::test]
     async fn begin_returns_expected_ids() {
         let engine = CheckpointEngine::new();
-        let (checkpoint_id, storage_path) = engine
-            .begin("job-42", 1, 5, vec!["w0".to_string()])
-            .await;
+        let (checkpoint_id, storage_path) =
+            engine.begin("job-42", 1, 5, vec!["w0".to_string()]).await;
 
         assert_eq!(checkpoint_id, "ckpt-job-42-1-5");
         assert_eq!(storage_path, "checkpoints/ckpt-job-42-1-5");
@@ -220,12 +219,7 @@ mod tests {
     async fn commit_all_workers_transitions_to_committed() {
         let engine = CheckpointEngine::new();
         let (ckpt_id, _) = engine
-            .begin(
-                "job-1",
-                0,
-                0,
-                vec!["w0".to_string(), "w1".to_string()],
-            )
+            .begin("job-1", 0, 0, vec!["w0".to_string(), "w1".to_string()])
             .await;
 
         let first = engine.worker_commit(&ckpt_id, "w0", 100).await.unwrap();
@@ -239,12 +233,7 @@ mod tests {
     async fn commit_partial_returns_false() {
         let engine = CheckpointEngine::new();
         let (ckpt_id, _) = engine
-            .begin(
-                "job-2",
-                0,
-                0,
-                vec!["w0".to_string(), "w1".to_string()],
-            )
+            .begin("job-2", 0, 0, vec!["w0".to_string(), "w1".to_string()])
             .await;
 
         let result = engine.worker_commit(&ckpt_id, "w0", 512).await.unwrap();
@@ -254,10 +243,7 @@ mod tests {
     #[tokio::test]
     async fn commit_unknown_checkpoint_returns_not_found() {
         let engine = CheckpointEngine::new();
-        let err = engine
-            .worker_commit("bogus-id", "w0", 0)
-            .await
-            .unwrap_err();
+        let err = engine.worker_commit("bogus-id", "w0", 0).await.unwrap_err();
 
         assert!(matches!(err, CheckpointError::NotFound(_)));
     }
@@ -271,10 +257,7 @@ mod tests {
 
         engine.worker_commit(&ckpt_id, "w0", 64).await.unwrap();
 
-        let err = engine
-            .worker_commit(&ckpt_id, "w0", 64)
-            .await
-            .unwrap_err();
+        let err = engine.worker_commit(&ckpt_id, "w0", 64).await.unwrap_err();
 
         assert!(matches!(err, CheckpointError::AlreadyCommitted(_)));
     }
@@ -282,18 +265,13 @@ mod tests {
     #[tokio::test]
     async fn abort_cleans_up_session() {
         let engine = CheckpointEngine::new();
-        let (ckpt_id, _) = engine
-            .begin("job-4", 0, 0, vec!["w0".to_string()])
-            .await;
+        let (ckpt_id, _) = engine.begin("job-4", 0, 0, vec!["w0".to_string()]).await;
 
         let aborted = engine.abort(&ckpt_id, "node failure").await;
         assert!(aborted);
 
         // Session must have been removed — worker_commit should return NotFound
-        let err = engine
-            .worker_commit(&ckpt_id, "w0", 0)
-            .await
-            .unwrap_err();
+        let err = engine.worker_commit(&ckpt_id, "w0", 0).await.unwrap_err();
         assert!(matches!(err, CheckpointError::NotFound(_)));
     }
 
@@ -307,9 +285,7 @@ mod tests {
     #[tokio::test]
     async fn abort_committed_checkpoint_returns_false() {
         let engine = CheckpointEngine::new();
-        let (ckpt_id, _) = engine
-            .begin("job-5", 0, 0, vec!["w0".to_string()])
-            .await;
+        let (ckpt_id, _) = engine.begin("job-5", 0, 0, vec!["w0".to_string()]).await;
 
         // Fully commit first
         let committed = engine.worker_commit(&ckpt_id, "w0", 256).await.unwrap();
