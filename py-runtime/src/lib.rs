@@ -395,6 +395,36 @@ impl Runtime {
         self.shutdown();
     }
 
+    /// Create a checkpoint manager for this job.
+    ///
+    /// Parameters
+    /// ----------
+    /// storage_path : str
+    ///     Local directory (or S3 prefix) where checkpoint files are stored.
+    /// keep_last : int, optional
+    ///     Number of recent checkpoints to keep. Older ones are deleted
+    ///     automatically. Defaults to 0 (keep all).
+    ///
+    /// Returns
+    /// -------
+    /// Checkpoint
+    ///     A checkpoint interface bound to this job.
+    #[pyo3(signature = (storage_path, keep_last=0))]
+    fn register_checkpoint(&self, storage_path: &str, keep_last: usize) -> PyResult<Checkpoint> {
+        let tokio_rt = tokio::runtime::Runtime::new()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        Ok(Checkpoint {
+            job_id: self.job_id.clone(),
+            storage_path: PathBuf::from(storage_path),
+            registry: Arc::new(Mutex::new(CheckpointRegistry::new(keep_last))),
+            tokio_rt,
+            on_save_complete_cb: Arc::new(Mutex::new(None)),
+            on_save_failed_cb: Arc::new(Mutex::new(None)),
+            pending_saves: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        })
+    }
+
     /// Register a dataset with the coordinator and receive shard assignments.
     ///
     /// Parameters
@@ -642,6 +672,251 @@ impl BatchIterator {
     }
 }
 
+/// Async checkpoint save/load interface with retention and callbacks.
+///
+/// ``save()`` returns immediately (data is pickled synchronously but the
+/// file write runs in a background Rust task). Register callbacks with
+/// ``on_save_complete()`` and ``on_save_failed()`` to be notified.
+///
+/// Example
+/// -------
+/// >>> ckpt = rt.register_checkpoint("./checkpoints", keep_last=5)
+/// >>> ckpt.on_save_complete(lambda meta: print("saved", meta["step"]))
+/// >>> ckpt.save(model.state_dict(), step=100)
+/// >>> state = ckpt.load()
+#[pyclass]
+struct Checkpoint {
+    job_id: String,
+    storage_path: PathBuf,
+    registry: Arc<Mutex<CheckpointRegistry>>,
+    tokio_rt: tokio::runtime::Runtime,
+    on_save_complete_cb: Arc<Mutex<Option<Py<PyAny>>>>,
+    on_save_failed_cb: Arc<Mutex<Option<Py<PyAny>>>>,
+    pending_saves: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[pymethods]
+impl Checkpoint {
+    /// Save a state dict to a checkpoint file.
+    ///
+    /// The state dict is pickled synchronously, then written to disk in a
+    /// background task. Returns immediately (typically under 100 ms).
+    ///
+    /// Parameters
+    /// ----------
+    /// state_dict : Any
+    ///     The object to checkpoint (typically ``model.state_dict()``).
+    /// step : int
+    ///     Training step number.
+    /// epoch : int, optional
+    ///     Training epoch. Defaults to 0.
+    /// loss : float, optional
+    ///     Loss value to record in metadata.
+    /// config_hash : str, optional
+    ///     Configuration hash to record in metadata.
+    #[pyo3(signature = (state_dict, step, epoch=0, loss=None, config_hash=None))]
+    fn save(
+        &self,
+        py: Python<'_>,
+        state_dict: Py<PyAny>,
+        step: u64,
+        epoch: u64,
+        loss: Option<f64>,
+        config_hash: Option<String>,
+    ) -> PyResult<()> {
+        // 1. Pickle the state dict (synchronous, GIL held)
+        let pickle = py.import("pickle")?;
+        let data_bytes: Vec<u8> = pickle.call_method1("dumps", (&state_dict,))?.extract()?;
+        let data = Bytes::from(data_bytes);
+
+        // 2. Prepare paths and identifiers
+        let file_name = format!("ckpt-{step}.pkl");
+        let file_path = self.storage_path.join(&file_name);
+        let checkpoint_id = format!("ckpt-{}-{epoch}-{step}", self.job_id);
+
+        // 3. Clone shared state for the spawned task
+        let registry = Arc::clone(&self.registry);
+        let job_id = self.job_id.clone();
+        let on_complete = Arc::clone(&self.on_save_complete_cb);
+        let on_failed = Arc::clone(&self.on_save_failed_cb);
+        let pending = Arc::clone(&self.pending_saves);
+        let storage_path = self.storage_path.clone();
+
+        // 4. Increment pending counter
+        pending.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        // 5. Spawn background write
+        self.tokio_rt.spawn(async move {
+            let total_bytes = data.len() as u64;
+
+            // Ensure parent directory exists, then write
+            let result = async {
+                if let Some(parent) = file_path.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+                tokio::fs::write(&file_path, &data).await
+            }
+            .await;
+
+            match result {
+                Ok(()) => {
+                    // Record in registry and apply retention
+                    let evicted = {
+                        let mut reg = registry.lock().unwrap();
+                        reg.record(
+                            &checkpoint_id,
+                            &job_id,
+                            epoch,
+                            step,
+                            total_bytes,
+                            loss,
+                            config_hash,
+                        );
+                        reg.apply_retention(&job_id)
+                    };
+
+                    // Delete evicted checkpoint files
+                    for meta in &evicted {
+                        let old_path = storage_path.join(format!("ckpt-{}.pkl", meta.step));
+                        let _ = tokio::fs::remove_file(&old_path).await;
+                    }
+
+                    // Fire on_save_complete callback
+                    Python::attach(|py| {
+                        let guard = on_complete.lock().unwrap();
+                        if let Some(ref cb) = *guard {
+                            let d = PyDict::new(py);
+                            let _ = d.set_item("step", step);
+                            let _ = d.set_item("checkpoint_id", &checkpoint_id);
+                            let _ = d.set_item("total_bytes", total_bytes);
+                            let _: PyResult<Py<PyAny>> = cb.call1(py, (d,));
+                        }
+                    });
+                }
+                Err(e) => {
+                    // Fire on_save_failed callback
+                    let err_msg = e.to_string();
+                    Python::attach(|py| {
+                        let guard = on_failed.lock().unwrap();
+                        if let Some(ref cb) = *guard {
+                            let _: PyResult<Py<PyAny>> = cb.call1(py, (err_msg.as_str(),));
+                        }
+                    });
+                }
+            }
+
+            pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        Ok(())
+    }
+
+    /// Load a checkpoint and return the unpickled state dict.
+    ///
+    /// Parameters
+    /// ----------
+    /// version : str, optional
+    ///     ``"latest"`` (default) loads the most recent checkpoint.
+    ///     A numeric string (e.g. ``"3"``) loads that specific version.
+    ///
+    /// Returns
+    /// -------
+    /// Any
+    ///     The unpickled state dict.
+    ///
+    /// Raises
+    /// ------
+    /// FileNotFoundError
+    ///     If no checkpoint is found.
+    #[pyo3(signature = (version="latest"))]
+    fn load(&self, py: Python<'_>, version: &str) -> PyResult<Py<PyAny>> {
+        let meta = {
+            let reg = self.registry.lock().unwrap();
+            if version == "latest" {
+                reg.latest_for_job(&self.job_id)
+            } else {
+                let ver: u64 = version.parse().map_err(|_| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "version must be 'latest' or a number, got: {version}"
+                    ))
+                })?;
+                reg.get_by_version(ver)
+            }
+        };
+
+        let meta = meta
+            .ok_or_else(|| pyo3::exceptions::PyFileNotFoundError::new_err("no checkpoint found"))?;
+
+        let file_path = self.storage_path.join(format!("ckpt-{}.pkl", meta.step));
+
+        // Read file (release GIL during I/O)
+        let tokio_rt = &self.tokio_rt;
+        let data = py.detach(|| {
+            tokio_rt.block_on(async {
+                tokio::fs::read(&file_path)
+                    .await
+                    .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
+            })
+        })?;
+
+        // Unpickle
+        let pickle = py.import("pickle")?;
+        let obj = pickle.call_method1("loads", (PyBytes::new(py, &data),))?;
+        Ok(obj.unbind())
+    }
+
+    /// Register a callback invoked after each successful save.
+    ///
+    /// The callback receives a single ``dict`` argument with keys
+    /// ``step``, ``checkpoint_id``, and ``total_bytes``.
+    fn on_save_complete(&self, callback: Py<PyAny>) {
+        *self.on_save_complete_cb.lock().unwrap() = Some(callback);
+    }
+
+    /// Register a callback invoked when a save fails.
+    ///
+    /// The callback receives a single ``str`` argument with the error message.
+    fn on_save_failed(&self, callback: Py<PyAny>) {
+        *self.on_save_failed_cb.lock().unwrap() = Some(callback);
+    }
+
+    /// Block until all pending background saves have finished.
+    ///
+    /// Useful before exiting to ensure all checkpoints are flushed.
+    fn wait(&self, py: Python<'_>) {
+        let pending = &self.pending_saves;
+        py.detach(|| {
+            while pending.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
+    }
+
+    /// List all committed checkpoints, sorted by version.
+    fn list_checkpoints(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let reg = self.registry.lock().unwrap();
+        let entries = reg.list(&self.job_id);
+        let list = PyList::empty(py);
+        for m in &entries {
+            list.append(metadata_to_dict(py, m)?)?;
+        }
+        Ok(list.into())
+    }
+
+    fn __repr__(&self) -> String {
+        let reg = self.registry.lock().unwrap();
+        let count = reg.list(&self.job_id).len();
+        let pending = self.pending_saves.load(std::sync::atomic::Ordering::SeqCst);
+        format!(
+            "Checkpoint(job_id={:?}, path={:?}, saved={}, pending={})",
+            self.job_id,
+            self.storage_path.display(),
+            count,
+            pending
+        )
+    }
+}
+
 #[pymodule]
 fn distruntime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ShardIterator>()?;
@@ -650,5 +925,6 @@ fn distruntime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Dataset>()?;
     m.add_class::<DatasetIterator>()?;
     m.add_class::<BatchIterator>()?;
+    m.add_class::<Checkpoint>()?;
     Ok(())
 }

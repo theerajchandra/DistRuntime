@@ -66,6 +66,7 @@ class Runtime:
     def job_id(self) -> str: ...
     def recover(self) -> Optional[dict[str, Any]]: ...
     def register_dataset(self, uri: str, num_shards: int, format: str) -> Dataset: ...
+    def register_checkpoint(self, storage_path: str, keep_last: int = 0) -> Checkpoint: ...
     def shutdown(self) -> None: ...
 
 class Dataset:
@@ -89,6 +90,38 @@ class Dataset:
     def __len__(self) -> int: ...
     def __iter__(self) -> DatasetIterator: ...
     def batches(self, batch_size: int) -> BatchIterator: ...
+
+class Checkpoint:
+    """Async checkpoint save/load with retention and callbacks.
+
+    ``save()`` returns immediately -- the file write runs in a background
+    Rust task. Register ``on_save_complete`` / ``on_save_failed`` callbacks
+    to be notified.
+    """
+
+    def save(
+        self,
+        state_dict: Any,
+        step: int,
+        epoch: int = 0,
+        loss: Optional[float] = None,
+        config_hash: Optional[str] = None,
+    ) -> None:
+        """Save a state dict asynchronously. Returns in under 100 ms."""
+        ...
+    def load(self, version: str = "latest") -> Any:
+        """Load and unpickle a checkpoint. *version* is ``"latest"`` or a version number."""
+        ...
+    def on_save_complete(self, callback: Any) -> None:
+        """Register a success callback: ``callback(meta_dict)``."""
+        ...
+    def on_save_failed(self, callback: Any) -> None:
+        """Register a failure callback: ``callback(error_message)``."""
+        ...
+    def wait(self) -> None:
+        """Block until all pending saves finish."""
+        ...
+    def list_checkpoints(self) -> list[dict[str, Any]]: ...
 
 class DatasetIterator:
     """Iterator over individual records from a dataset."""
