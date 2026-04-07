@@ -14,6 +14,9 @@ checkpoint-engine.workspace = true
 bytes.workspace = true
 arrow.workspace = true
 serde_json.workspace = true
+worker-client.workspace = true
+proto-gen.workspace = true
+tonic.workspace = true
 
 [lib]
 crate-type = ["cdylib", "rlib"]
