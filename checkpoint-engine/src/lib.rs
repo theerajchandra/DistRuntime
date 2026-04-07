@@ -176,10 +176,11 @@ impl CheckpointEngine {
 
         match sessions.get(checkpoint_id) {
             None => return false,
-            Some(session) => match &session.phase {
-                CheckpointPhase::Committed { .. } => return false,
-                _ => {}
-            },
+            Some(session) => {
+                if let CheckpointPhase::Committed { .. } = &session.phase {
+                    return false;
+                }
+            }
         }
 
         tracing::warn!(checkpoint_id, reason, "checkpoint aborted");

@@ -41,7 +41,7 @@ async fn start_coordinator(
     let addr = listener.local_addr().unwrap();
     let url = format!("http://{addr}");
 
-    let svc = CoordinatorServiceImpl::new(tracker, registry);
+    let svc = CoordinatorServiceImpl::new(tracker, registry, checkpoint_engine::CheckpointEngine::new());
 
     let handle = tokio::spawn(async move {
         Server::builder()
