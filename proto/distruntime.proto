@@ -139,6 +139,62 @@ message RecoverWorkerResponse {
 }
 
 // ---------------------------------------------------------------------------
+// CLI / observability (read-only)
+// ---------------------------------------------------------------------------
+
+message DatasetSummary {
+  string dataset_id = 1;
+  string uri = 2;
+  string format = 3;
+  uint64 num_shards = 4;
+}
+
+message GetJobStatusRequest {
+  string job_id = 1;
+}
+
+message GetJobStatusResponse {
+  string job_id = 1;
+  repeated DatasetSummary datasets = 2;
+  uint32 alive_workers = 3;
+  uint32 total_workers = 4;
+  uint64 rebalance_generation = 5;
+}
+
+message CheckpointEntry {
+  uint64 version = 1;
+  string checkpoint_id = 2;
+  string job_id = 3;
+  uint64 epoch = 4;
+  uint64 step = 5;
+  uint64 committed_at_secs = 6;
+  uint64 total_bytes = 7;
+}
+
+message ListCheckpointsRequest {
+  string job_id = 1;
+}
+
+message ListCheckpointsResponse {
+  repeated CheckpointEntry checkpoints = 1;
+}
+
+message GetCheckpointRestoreInfoRequest {
+  // Global registry version (not training step).
+  uint64 version = 1;
+}
+
+message GetCheckpointRestoreInfoResponse {
+  bool found = 1;
+  uint64 version = 2;
+  string checkpoint_id = 3;
+  string job_id = 4;
+  uint64 epoch = 5;
+  uint64 step = 6;
+  string committed_path = 7;
+}
+
+// ---------------------------------------------------------------------------
 // Services
 // ---------------------------------------------------------------------------
 
@@ -150,6 +206,9 @@ service CoordinatorService {
   rpc CheckpointAbort(CheckpointAbortRequest) returns (CheckpointAbortResponse);
   rpc RecoverWorker(RecoverWorkerRequest) returns (RecoverWorkerResponse);
   rpc RegisterDataset(RegisterDatasetRequest) returns (RegisterDatasetResponse);
+  rpc GetJobStatus(GetJobStatusRequest) returns (GetJobStatusResponse);
+  rpc ListCheckpoints(ListCheckpointsRequest) returns (ListCheckpointsResponse);
+  rpc GetCheckpointRestoreInfo(GetCheckpointRestoreInfoRequest) returns (GetCheckpointRestoreInfoResponse);
 }
 
 service WorkerService {

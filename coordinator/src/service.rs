@@ -1,8 +1,10 @@
 use proto_gen::distruntime::coordinator_service_server::CoordinatorService;
 use proto_gen::distruntime::{
     CheckpointAbortRequest, CheckpointAbortResponse, CheckpointBeginRequest,
-    CheckpointBeginResponse, CheckpointCommitRequest, CheckpointCommitResponse,
-    DatasetShardAssignment, HeartbeatRequest, HeartbeatResponse, RecoverWorkerRequest,
+    CheckpointBeginResponse, CheckpointCommitRequest, CheckpointCommitResponse, CheckpointEntry,
+    DatasetShardAssignment, DatasetSummary, GetCheckpointRestoreInfoRequest,
+    GetCheckpointRestoreInfoResponse, GetJobStatusRequest, GetJobStatusResponse, HeartbeatRequest,
+    HeartbeatResponse, ListCheckpointsRequest, ListCheckpointsResponse, RecoverWorkerRequest,
     RecoverWorkerResponse, RegisterDatasetRequest, RegisterDatasetResponse, WorkerReadyRequest,
     WorkerReadyResponse,
 };
@@ -239,6 +241,102 @@ impl CoordinatorService for CoordinatorServiceImpl {
             checkpoint_path,
             assigned_shards,
         }))
+    }
+
+    async fn get_job_status(
+        &self,
+        request: Request<GetJobStatusRequest>,
+    ) -> Result<Response<GetJobStatusResponse>, Status> {
+        let req = request.into_inner();
+        let job_id = req.job_id;
+        let datasets: Vec<DatasetSummary> = self
+            .registry
+            .list_for_job(&job_id)
+            .await
+            .into_iter()
+            .map(|d| DatasetSummary {
+                dataset_id: d.dataset_id,
+                uri: d.uri,
+                format: d.format,
+                num_shards: d.num_shards,
+            })
+            .collect();
+        let (alive_workers, total_workers) = self.tracker.worker_counts().await;
+        let rebalance_generation = self.registry.rebalance_generation().await;
+        Ok(Response::new(GetJobStatusResponse {
+            job_id,
+            datasets,
+            alive_workers,
+            total_workers,
+            rebalance_generation,
+        }))
+    }
+
+    async fn list_checkpoints(
+        &self,
+        request: Request<ListCheckpointsRequest>,
+    ) -> Result<Response<ListCheckpointsResponse>, Status> {
+        let req = request.into_inner();
+        let job_id = req.job_id;
+        let checkpoints: Vec<CheckpointEntry> = match self.checkpoint_engine.checkpoint_registry() {
+            None => vec![],
+            Some(reg) => {
+                let reg = reg.lock().unwrap();
+                reg.list(&job_id)
+                    .into_iter()
+                    .map(|m| CheckpointEntry {
+                        version: m.version,
+                        checkpoint_id: m.checkpoint_id,
+                        job_id: m.job_id,
+                        epoch: m.epoch,
+                        step: m.step,
+                        committed_at_secs: m.committed_at_secs,
+                        total_bytes: m.total_bytes,
+                    })
+                    .collect()
+            }
+        };
+        Ok(Response::new(ListCheckpointsResponse { checkpoints }))
+    }
+
+    async fn get_checkpoint_restore_info(
+        &self,
+        request: Request<GetCheckpointRestoreInfoRequest>,
+    ) -> Result<Response<GetCheckpointRestoreInfoResponse>, Status> {
+        let req = request.into_inner();
+        let version = req.version;
+        let meta = match self.checkpoint_engine.checkpoint_registry() {
+            None => None,
+            Some(reg) => {
+                let reg = reg.lock().unwrap();
+                reg.get_by_version(version)
+            }
+        };
+        let response = match meta {
+            None => GetCheckpointRestoreInfoResponse {
+                found: false,
+                version: 0,
+                checkpoint_id: String::new(),
+                job_id: String::new(),
+                epoch: 0,
+                step: 0,
+                committed_path: String::new(),
+            },
+            Some(m) => {
+                let committed_path =
+                    checkpoint_engine::ResumeInfo::from_metadata(&m).committed_path;
+                GetCheckpointRestoreInfoResponse {
+                    found: true,
+                    version: m.version,
+                    checkpoint_id: m.checkpoint_id,
+                    job_id: m.job_id,
+                    epoch: m.epoch,
+                    step: m.step,
+                    committed_path,
+                }
+            }
+        };
+        Ok(Response::new(response))
     }
 }
 

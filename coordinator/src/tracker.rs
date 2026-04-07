@@ -176,6 +176,14 @@ impl LivenessTracker {
         ids
     }
 
+    /// Count of workers marked alive vs total registered (alive or dead).
+    pub async fn worker_counts(&self) -> (u32, u32) {
+        let state = self.inner.lock().await;
+        let total = state.workers.len() as u32;
+        let alive = state.workers.values().filter(|e| e.alive).count() as u32;
+        (alive, total)
+    }
+
     pub fn shutdown(&self) {
         self.shutdown.notify_one();
     }
