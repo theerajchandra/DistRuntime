@@ -1,6 +1,9 @@
 mod storage;
 pub use storage::CheckpointStorage;
 
+pub mod registry;
+pub use registry::{CheckpointMetadata, CheckpointRegistry};
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -57,6 +60,7 @@ struct CheckpointSession {
 pub struct CheckpointEngine {
     sessions: Arc<Mutex<HashMap<String, CheckpointSession>>>,
     storage: Option<Arc<storage::CheckpointStorage>>,
+    registry: Option<Arc<std::sync::Mutex<registry::CheckpointRegistry>>>,
 }
 
 impl CheckpointEngine {
@@ -64,6 +68,7 @@ impl CheckpointEngine {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             storage: None,
+            registry: None,
         }
     }
 
@@ -71,6 +76,14 @@ impl CheckpointEngine {
     /// promoted to committed on a successful checkpoint and GC'd on abort.
     pub fn with_storage(mut self, s: CheckpointStorage) -> Self {
         self.storage = Some(Arc::new(s));
+        self
+    }
+
+    /// Attach a [`CheckpointRegistry`] for checkpoint versioning and retention.
+    /// When set, every fully committed checkpoint is recorded in the registry
+    /// and the retention policy is applied automatically.
+    pub fn with_registry(mut self, r: CheckpointRegistry) -> Self {
+        self.registry = Some(Arc::new(std::sync::Mutex::new(r)));
         self
     }
 
@@ -174,6 +187,20 @@ impl CheckpointEngine {
                     "checkpoint fully committed"
                 );
                 session.phase = CheckpointPhase::Committed;
+
+                if let Some(ref registry) = self.registry {
+                    let mut reg = registry.lock().unwrap();
+                    let ckpt_id_str = checkpoint_id.to_string();
+                    let jid = session.job_id.clone();
+                    let ep = session.epoch;
+                    let st = session.step;
+                    let meta = reg.record(&ckpt_id_str, &jid, ep, st, total_bytes, None, None);
+                    let evicted = reg.apply_retention(&jid);
+                    tracing::info!(version = meta.version, checkpoint_id, job_id = %jid, "checkpoint version recorded");
+                    if !evicted.is_empty() {
+                        tracing::info!(evicted = evicted.len(), job_id = %jid, "retention policy evicted old checkpoints");
+                    }
+                }
 
                 if let Some(ref storage) = self.storage {
                     let storage = Arc::clone(storage);

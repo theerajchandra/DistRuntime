@@ -2,9 +2,11 @@ use anyhow::Result;
 use bytes::Bytes;
 use pyo3::exceptions::PyStopIteration;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use checkpoint_engine::{CheckpointMetadata, CheckpointRegistry};
 
 use data_loader::{
     BuiltinFormat, ParallelShardReader, Record, RecordFormatPlugin, ShardDescriptor,
@@ -140,8 +142,117 @@ fn record_to_python(py: Python<'_>, record: Record) -> PyResult<Py<PyAny>> {
     }
 }
 
+fn metadata_to_dict(py: Python<'_>, m: &CheckpointMetadata) -> PyResult<Py<PyAny>> {
+    let d = PyDict::new(py);
+    d.set_item("version", m.version)?;
+    d.set_item("checkpoint_id", &m.checkpoint_id)?;
+    d.set_item("job_id", &m.job_id)?;
+    d.set_item("epoch", m.epoch)?;
+    d.set_item("step", m.step)?;
+    d.set_item("committed_at_secs", m.committed_at_secs)?;
+    d.set_item("total_bytes", m.total_bytes)?;
+    d.set_item("loss", m.loss.into_pyobject(py)?)?;
+    d.set_item("config_hash", m.config_hash.as_deref().into_pyobject(py)?)?;
+    Ok(d.into())
+}
+
+/// Python interface for checkpoint versioning and retention.
+///
+/// Records committed checkpoints, assigns monotonic version IDs,
+/// and enforces a configurable retention policy (keep last N per job).
+#[pyclass]
+struct CheckpointManager {
+    job_id: String,
+    inner: Arc<Mutex<CheckpointRegistry>>,
+}
+
+#[pymethods]
+impl CheckpointManager {
+    #[new]
+    #[pyo3(signature = (job_id, retention=0))]
+    fn new(job_id: String, retention: usize) -> Self {
+        Self {
+            job_id,
+            inner: Arc::new(Mutex::new(CheckpointRegistry::new(retention))),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (checkpoint_id, step, epoch, total_bytes, loss=None, config_hash=None))]
+    fn record_checkpoint(
+        &self,
+        py: Python<'_>,
+        checkpoint_id: String,
+        step: u64,
+        epoch: u64,
+        total_bytes: u64,
+        loss: Option<f64>,
+        config_hash: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
+        let mut reg = self.inner.lock().unwrap();
+        let meta = reg.record(
+            &checkpoint_id,
+            &self.job_id,
+            epoch,
+            step,
+            total_bytes,
+            loss,
+            config_hash,
+        );
+        reg.apply_retention(&self.job_id);
+        metadata_to_dict(py, &meta)
+    }
+
+    fn list_checkpoints(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let reg = self.inner.lock().unwrap();
+        let entries = reg.list(&self.job_id);
+        let list = pyo3::types::PyList::empty(py);
+        for m in &entries {
+            list.append(metadata_to_dict(py, m)?)?;
+        }
+        Ok(list.into())
+    }
+
+    fn delete_checkpoint(&self, version: u64) -> bool {
+        let mut reg = self.inner.lock().unwrap();
+        reg.delete(version).is_some()
+    }
+
+    fn get_checkpoint(&self, py: Python<'_>, version: u64) -> PyResult<Option<Py<PyAny>>> {
+        let reg = self.inner.lock().unwrap();
+        match reg.get_by_version(version) {
+            Some(m) => Ok(Some(metadata_to_dict(py, &m)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn get_checkpoint_by_step(&self, py: Python<'_>, step: u64) -> PyResult<Option<Py<PyAny>>> {
+        let reg = self.inner.lock().unwrap();
+        match reg.get_by_step(&self.job_id, step) {
+            Some(m) => Ok(Some(metadata_to_dict(py, &m)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn set_retention(&self, n: usize) {
+        let mut reg = self.inner.lock().unwrap();
+        reg.set_retention(n);
+    }
+
+    fn __repr__(&self) -> String {
+        let reg = self.inner.lock().unwrap();
+        format!(
+            "CheckpointManager(job_id={:?}, retention={}, count={})",
+            self.job_id,
+            reg.retention(),
+            reg.list(&self.job_id).len()
+        )
+    }
+}
+
 #[pymodule]
 fn distruntime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ShardIterator>()?;
+    m.add_class::<CheckpointManager>()?;
     Ok(())
 }

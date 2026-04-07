@@ -10,6 +10,7 @@ tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 data-loader.workspace = true
+checkpoint-engine.workspace = true
 bytes.workspace = true
 arrow.workspace = true
 serde_json.workspace = true
