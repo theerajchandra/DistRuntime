@@ -8,6 +8,8 @@ use proto_gen::distruntime::{
 };
 use tonic::{Request, Response, Status};
 
+use checkpoint_engine::{CheckpointEngine, CheckpointError};
+
 use crate::registry::DatasetRegistry;
 use crate::shard_map;
 use crate::tracker::LivenessTracker;
@@ -15,11 +17,12 @@ use crate::tracker::LivenessTracker;
 pub struct CoordinatorServiceImpl {
     tracker: LivenessTracker,
     registry: DatasetRegistry,
+    checkpoint_engine: CheckpointEngine,
 }
 
 impl CoordinatorServiceImpl {
-    pub fn new(tracker: LivenessTracker, registry: DatasetRegistry) -> Self {
-        Self { tracker, registry }
+    pub fn new(tracker: LivenessTracker, registry: DatasetRegistry, checkpoint_engine: CheckpointEngine) -> Self {
+        Self { tracker, registry, checkpoint_engine }
     }
 }
 
@@ -114,23 +117,45 @@ impl CoordinatorService for CoordinatorServiceImpl {
 
     async fn checkpoint_begin(
         &self,
-        _request: Request<CheckpointBeginRequest>,
+        request: Request<CheckpointBeginRequest>,
     ) -> Result<Response<CheckpointBeginResponse>, Status> {
-        Err(Status::unimplemented("not yet implemented"))
+        let req = request.into_inner();
+        let alive = self.tracker.alive_worker_ids().await;
+        if alive.is_empty() {
+            return Err(Status::failed_precondition("no alive workers for checkpoint"));
+        }
+        let (checkpoint_id, storage_path) = self
+            .checkpoint_engine
+            .begin(&req.job_id, req.epoch, req.step, alive)
+            .await;
+        tracing::info!(checkpoint_id = %checkpoint_id, job_id = %req.job_id, epoch = req.epoch, step = req.step, "checkpoint begun");
+        Ok(Response::new(CheckpointBeginResponse { checkpoint_id, storage_path }))
     }
 
     async fn checkpoint_commit(
         &self,
-        _request: Request<CheckpointCommitRequest>,
+        request: Request<CheckpointCommitRequest>,
     ) -> Result<Response<CheckpointCommitResponse>, Status> {
-        Err(Status::unimplemented("not yet implemented"))
+        let req = request.into_inner();
+        let all_done = self
+            .checkpoint_engine
+            .worker_commit(&req.checkpoint_id, &req.worker_id, req.bytes_written)
+            .await
+            .map_err(|e| match e {
+                CheckpointError::NotFound(_) => Status::not_found(e.to_string()),
+                CheckpointError::InvalidState(_) => Status::failed_precondition(e.to_string()),
+                CheckpointError::AlreadyCommitted(_) => Status::already_exists(e.to_string()),
+            })?;
+        Ok(Response::new(CheckpointCommitResponse { success: all_done }))
     }
 
     async fn checkpoint_abort(
         &self,
-        _request: Request<CheckpointAbortRequest>,
+        request: Request<CheckpointAbortRequest>,
     ) -> Result<Response<CheckpointAbortResponse>, Status> {
-        Err(Status::unimplemented("not yet implemented"))
+        let req = request.into_inner();
+        let acknowledged = self.checkpoint_engine.abort(&req.checkpoint_id, &req.reason).await;
+        Ok(Response::new(CheckpointAbortResponse { acknowledged }))
     }
 
     async fn recover_worker(

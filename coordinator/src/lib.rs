@@ -7,3 +7,4 @@ pub use registry::DatasetRegistry;
 pub use service::CoordinatorServiceImpl;
 pub use shard_map::compute_shard_map;
 pub use tracker::LivenessTracker;
+pub use checkpoint_engine::CheckpointEngine;
