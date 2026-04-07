@@ -394,6 +394,73 @@ impl Runtime {
     fn __del__(&mut self) {
         self.shutdown();
     }
+
+    /// Register a dataset with the coordinator and receive shard assignments.
+    ///
+    /// Parameters
+    /// ----------
+    /// uri : str
+    ///     Storage URI for the dataset (e.g. "s3://bucket/data/" or "/local/path/").
+    /// num_shards : int
+    ///     Total number of shards in the dataset.
+    /// format : str
+    ///     Data format: "parquet", "ndjson", "raw".
+    ///
+    /// Returns
+    /// -------
+    /// Dataset
+    ///     A dataset object bound to this worker's assigned shards.
+    fn register_dataset(
+        &self,
+        py: Python<'_>,
+        uri: &str,
+        num_shards: u64,
+        format: &str,
+    ) -> PyResult<Dataset> {
+        let job_id = self.job_id.clone();
+        let uri_owned = uri.to_string();
+        let format_owned = format.to_string();
+        let worker_client = &self.worker_client;
+        let tokio_rt = &self.tokio_rt;
+
+        let (dataset_id, shard_indices) = py.detach(|| {
+            let mut client = worker_client.lock().unwrap();
+            tokio_rt.block_on(async {
+                let ds_id = client
+                    .register_dataset(&job_id, &uri_owned, num_shards, &format_owned)
+                    .await
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+                // Perform a heartbeat to get our shard assignments
+                let (_gen, assignments) = client
+                    .heartbeat_once()
+                    .await
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+                // Find assignments for this dataset
+                let mut indices: Vec<u64> = Vec::new();
+                for a in &assignments {
+                    if a.dataset_id == ds_id {
+                        for range in &a.shards {
+                            for i in range.start..range.end {
+                                indices.push(i);
+                            }
+                        }
+                    }
+                }
+
+                Ok::<_, PyErr>((ds_id, indices))
+            })
+        })?;
+
+        Ok(Dataset {
+            dataset_id,
+            uri: uri_owned,
+            format: format_owned,
+            num_shards,
+            shard_indices,
+        })
+    }
 }
 
 /// Represents a registered dataset with shard assignments.
@@ -407,6 +474,7 @@ struct Dataset {
     uri: String,
     format: String,
     num_shards: u64,
+    shard_indices: Vec<u64>,
 }
 
 #[pymethods]
@@ -435,11 +503,142 @@ impl Dataset {
         self.num_shards
     }
 
+    /// Shard indices assigned to this worker.
+    #[getter]
+    fn shard_indices(&self) -> Vec<u64> {
+        self.shard_indices.clone()
+    }
+
+    /// Return the number of shards assigned to this worker.
+    fn __len__(&self) -> usize {
+        self.shard_indices.len()
+    }
+
+    /// Iterate over individual records from the assigned shards.
+    ///
+    /// Compatible with ``torch.utils.data.DataLoader(dataset, num_workers=0)``.
+    fn __iter__(&self) -> PyResult<DatasetIterator> {
+        let fmt = BuiltinFormat::from_str_loose(&self.format).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!("unknown format: {}", self.format))
+        })?;
+
+        let ext = format_to_extension(&self.format);
+
+        let desc = ShardDescriptor {
+            base_dir: PathBuf::from(&self.uri),
+            extension: ext,
+            shard_indices: self.shard_indices.clone(),
+        };
+
+        let runtime = tokio::runtime::Runtime::new()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        let reader =
+            ParallelShardReader::open_plugin(desc, Arc::new(fmt), data_loader::prefetch_depth());
+
+        Ok(DatasetIterator {
+            reader: Some(reader),
+            runtime,
+        })
+    }
+
+    /// Iterate over batches of records.
+    ///
+    /// Parameters
+    /// ----------
+    /// batch_size : int
+    ///     Number of records per batch.
+    ///
+    /// Returns
+    /// -------
+    /// BatchIterator
+    ///     An iterator yielding lists of records, each list up to ``batch_size``
+    ///     elements.
+    fn batches(&self, batch_size: usize) -> PyResult<BatchIterator> {
+        let iter = self.__iter__()?;
+        Ok(BatchIterator {
+            inner: iter,
+            batch_size,
+        })
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "Dataset(id={:?}, uri={:?}, format={:?}, shards={})",
             self.dataset_id, self.uri, self.format, self.num_shards
         )
+    }
+}
+
+/// Map format name to file extension.
+fn format_to_extension(format: &str) -> String {
+    match format.to_lowercase().as_str() {
+        "parquet" => "parquet".to_string(),
+        "ndjson" | "jsonl" => "jsonl".to_string(),
+        "raw" | "raw_bytes" | "bytes" => "dat".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Iterator over individual records from a dataset's assigned shards.
+#[pyclass]
+struct DatasetIterator {
+    reader: Option<ParallelShardReader>,
+    runtime: tokio::runtime::Runtime,
+}
+
+#[pymethods]
+impl DatasetIterator {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let reader = self
+            .reader
+            .as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("iterator exhausted"))?;
+
+        let record = self.runtime.block_on(reader.next_record());
+
+        match record {
+            Some(Ok(rec)) => record_to_python(py, rec),
+            Some(Err(e)) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+            None => Err(PyStopIteration::new_err(())),
+        }
+    }
+}
+
+/// Iterator that yields lists of records grouped into batches.
+#[pyclass]
+struct BatchIterator {
+    inner: DatasetIterator,
+    batch_size: usize,
+}
+
+#[pymethods]
+impl BatchIterator {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let mut batch = Vec::with_capacity(self.batch_size);
+
+        for _ in 0..self.batch_size {
+            match self.inner.__next__(py) {
+                Ok(item) => batch.push(item),
+                Err(e) if e.is_instance_of::<PyStopIteration>(py) => break,
+                Err(e) => return Err(e),
+            }
+        }
+
+        if batch.is_empty() {
+            return Err(PyStopIteration::new_err(()));
+        }
+
+        let list = PyList::new(py, &batch)?;
+        Ok(list.into())
     }
 }
 
@@ -449,5 +648,7 @@ fn distruntime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<CheckpointManager>()?;
     m.add_class::<Runtime>()?;
     m.add_class::<Dataset>()?;
+    m.add_class::<DatasetIterator>()?;
+    m.add_class::<BatchIterator>()?;
     Ok(())
 }

@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use proto_gen::distruntime::coordinator_service_client::CoordinatorServiceClient;
 use proto_gen::distruntime::{
-    DatasetShardAssignment, HeartbeatRequest, RecoverWorkerRequest, ShardRange, WorkerInfo,
-    WorkerReadyRequest,
+    DatasetShardAssignment, HeartbeatRequest, RecoverWorkerRequest, RegisterDatasetRequest,
+    ShardRange, WorkerInfo, WorkerReadyRequest,
 };
 use std::time::Duration;
 use tokio::sync::watch;
@@ -137,5 +137,60 @@ impl WorkerClient {
         } else {
             Ok(None)
         }
+    }
+
+    /// Register a dataset with the coordinator and return the assigned dataset ID.
+    ///
+    /// The coordinator distributes shards across all alive workers. Call
+    /// [`heartbeat_once`] afterwards to learn this worker's shard assignments.
+    pub async fn register_dataset(
+        &mut self,
+        job_id: &str,
+        uri: &str,
+        num_shards: u64,
+        format: &str,
+    ) -> anyhow::Result<String> {
+        let resp = self
+            .client
+            .register_dataset(RegisterDatasetRequest {
+                job_id: job_id.to_string(),
+                uri: uri.to_string(),
+                num_shards,
+                format: format.to_string(),
+            })
+            .await
+            .context("RegisterDataset RPC failed")?
+            .into_inner();
+
+        if !resp.accepted {
+            anyhow::bail!("coordinator rejected dataset registration");
+        }
+
+        tracing::info!(dataset_id = %resp.dataset_id, uri, num_shards, format, "dataset registered");
+        Ok(resp.dataset_id)
+    }
+
+    /// Perform a single heartbeat and return the current shard assignments.
+    ///
+    /// Useful after registering a dataset to immediately learn which shards
+    /// this worker is responsible for.
+    pub async fn heartbeat_once(&mut self) -> anyhow::Result<(u64, Vec<DatasetShardAssignment>)> {
+        let resp = self
+            .client
+            .heartbeat(HeartbeatRequest {
+                worker_id: self.worker_id.clone(),
+                epoch: 0,
+                step: 0,
+                throughput_samples_per_sec: 0.0,
+            })
+            .await
+            .context("Heartbeat RPC failed")?
+            .into_inner();
+
+        if !resp.acknowledged {
+            anyhow::bail!("heartbeat not acknowledged");
+        }
+
+        Ok((resp.rebalance_generation, resp.assignments))
     }
 }
