@@ -1,3 +1,6 @@
+mod storage;
+pub use storage::CheckpointStorage;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -53,13 +56,22 @@ struct CheckpointSession {
 /// that no partial checkpoint data can be mistakenly used.
 pub struct CheckpointEngine {
     sessions: Arc<Mutex<HashMap<String, CheckpointSession>>>,
+    storage: Option<Arc<storage::CheckpointStorage>>,
 }
 
 impl CheckpointEngine {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            storage: None,
         }
+    }
+
+    /// Attach a [`CheckpointStorage`] backend.  When set, staging shards are
+    /// promoted to committed on a successful checkpoint and GC'd on abort.
+    pub fn with_storage(mut self, s: CheckpointStorage) -> Self {
+        self.storage = Some(Arc::new(s));
+        self
     }
 
     /// Start a new checkpoint for `job_id` at the given `epoch` and `step`.
@@ -144,6 +156,15 @@ impl CheckpointEngine {
             Action::Err(e) => Err(e),
             Action::Pending => Ok(false),
             Action::Done(total_bytes) => {
+                // Collect committed worker IDs from the Preparing phase BEFORE
+                // we overwrite session.phase.
+                let worker_ids: Vec<String> =
+                    if let CheckpointPhase::Preparing { ref committed, .. } = session.phase {
+                        committed.keys().cloned().collect()
+                    } else {
+                        vec![]
+                    };
+
                 tracing::info!(
                     checkpoint_id,
                     job_id = %session.job_id,
@@ -153,6 +174,22 @@ impl CheckpointEngine {
                     "checkpoint fully committed"
                 );
                 session.phase = CheckpointPhase::Committed;
+
+                if let Some(ref storage) = self.storage {
+                    let storage = Arc::clone(storage);
+                    let ckpt_id = checkpoint_id.to_string();
+                    let wids = worker_ids.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = storage.promote_to_committed(&ckpt_id, &wids).await {
+                            tracing::error!(
+                                checkpoint_id = %ckpt_id,
+                                error = %e,
+                                "failed to promote checkpoint to committed"
+                            );
+                        }
+                    });
+                }
+
                 Ok(true)
             }
         }
@@ -187,8 +224,27 @@ impl CheckpointEngine {
         }
 
         // Remove from map — this is the "no partial data" guarantee.
-        // In a real system we would also delete the files under storage_path.
         sessions.remove(checkpoint_id);
+
+        if let Some(ref storage) = self.storage {
+            let storage = Arc::clone(storage);
+            let ckpt_id = checkpoint_id.to_string();
+            tokio::spawn(async move {
+                match storage.gc_staging(&ckpt_id).await {
+                    Ok(n) => tracing::info!(
+                        checkpoint_id = %ckpt_id,
+                        deleted = n,
+                        "staging GC complete"
+                    ),
+                    Err(e) => tracing::error!(
+                        checkpoint_id = %ckpt_id,
+                        error = %e,
+                        "staging GC failed"
+                    ),
+                }
+            });
+        }
+
         true
     }
 }
