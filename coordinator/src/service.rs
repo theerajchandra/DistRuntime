@@ -178,9 +178,67 @@ impl CoordinatorService for CoordinatorServiceImpl {
 
     async fn recover_worker(
         &self,
-        _request: Request<RecoverWorkerRequest>,
+        request: Request<RecoverWorkerRequest>,
     ) -> Result<Response<RecoverWorkerResponse>, Status> {
-        Err(Status::unimplemented("not yet implemented"))
+        let req = request.into_inner();
+        // last_checkpoint_id carries the job_id on restart
+        let job_id = &req.last_checkpoint_id;
+
+        // Look up the latest committed checkpoint for this job
+        let meta = match self.checkpoint_engine.checkpoint_registry() {
+            None => {
+                return Ok(Response::new(RecoverWorkerResponse {
+                    can_recover: false,
+                    checkpoint_path: String::new(),
+                    assigned_shards: vec![],
+                }))
+            }
+            Some(reg) => {
+                let reg = reg.lock().unwrap();
+                match reg.latest_for_job(job_id) {
+                    None => {
+                        return Ok(Response::new(RecoverWorkerResponse {
+                            can_recover: false,
+                            checkpoint_path: String::new(),
+                            assigned_shards: vec![],
+                        }))
+                    }
+                    Some(m) => m,
+                }
+            }
+        };
+
+        // Recompute shard assignments for the current alive worker pool.
+        // This handles mismatched worker counts (e.g. saved with 8, resuming with 4).
+        let alive = self.tracker.alive_worker_ids().await;
+        let datasets = self.registry.list_for_job(job_id).await;
+        let num_shards = datasets.first().map(|d| d.num_shards).unwrap_or(0);
+
+        let assigned_shards = if num_shards > 0 && !alive.is_empty() {
+            shard_map::compute_shard_map(num_shards, &alive)
+                .unwrap_or_default()
+                .remove(&req.worker_id)
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+
+        let checkpoint_path = format!("checkpoints/{}/committed/", meta.checkpoint_id);
+
+        tracing::info!(
+            worker_id = %req.worker_id,
+            job_id = %job_id,
+            step = meta.step,
+            epoch = meta.epoch,
+            checkpoint_id = %meta.checkpoint_id,
+            "worker resuming from checkpoint"
+        );
+
+        Ok(Response::new(RecoverWorkerResponse {
+            can_recover: true,
+            checkpoint_path,
+            assigned_shards,
+        }))
     }
 }
 

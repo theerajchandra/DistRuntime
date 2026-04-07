@@ -120,6 +120,21 @@ impl CheckpointRegistry {
     pub fn set_retention(&mut self, n: usize) {
         self.retention = n;
     }
+
+    pub fn latest_for_job(&self, job_id: &str) -> Option<CheckpointMetadata> {
+        self.entries
+            .values()
+            .filter(|m| m.job_id == job_id)
+            .max_by_key(|m| m.version)
+            .cloned()
+    }
+
+    pub fn get_by_checkpoint_id(&self, checkpoint_id: &str) -> Option<CheckpointMetadata> {
+        self.entries
+            .values()
+            .find(|m| m.checkpoint_id == checkpoint_id)
+            .cloned()
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -236,5 +251,21 @@ mod tests {
         let list_a = reg.list("job-a");
         assert_eq!(list_a.len(), 2);
         assert!(list_a.iter().all(|m| m.job_id == "job-a"));
+    }
+
+    #[test]
+    fn latest_for_job_returns_highest_version() {
+        let mut reg = CheckpointRegistry::new(0);
+        make_meta(&mut reg, "job-a", 10);
+        make_meta(&mut reg, "job-a", 20);
+        make_meta(&mut reg, "job-a", 30);
+        let latest = reg.latest_for_job("job-a").expect("should have a latest");
+        assert_eq!(latest.step, 30);
+    }
+
+    #[test]
+    fn latest_for_job_none_when_empty() {
+        let reg = CheckpointRegistry::new(0);
+        assert!(reg.latest_for_job("missing").is_none());
     }
 }

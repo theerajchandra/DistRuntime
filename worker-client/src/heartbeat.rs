@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use proto_gen::distruntime::coordinator_service_client::CoordinatorServiceClient;
 use proto_gen::distruntime::{
-    DatasetShardAssignment, HeartbeatRequest, WorkerInfo, WorkerReadyRequest,
+    DatasetShardAssignment, HeartbeatRequest, RecoverWorkerRequest, ShardRange, WorkerInfo,
+    WorkerReadyRequest,
 };
 use std::time::Duration;
 use tokio::sync::watch;
@@ -104,5 +105,37 @@ impl WorkerClient {
 
         let abort = handle.abort_handle();
         (handle, abort)
+    }
+
+    /// Ask the coordinator to resume from the latest checkpoint for `job_id`.
+    ///
+    /// Returns `Some((checkpoint_path, assigned_shards))` when recovery is
+    /// possible, or `None` when no checkpoint exists for the job.
+    pub async fn recover(
+        &mut self,
+        job_id: &str,
+    ) -> anyhow::Result<Option<(String, Vec<ShardRange>)>> {
+        let resp = self
+            .client
+            .recover_worker(RecoverWorkerRequest {
+                worker_id: self.worker_id.clone(),
+                last_checkpoint_id: job_id.to_string(),
+            })
+            .await
+            .context("RecoverWorker RPC failed")?
+            .into_inner();
+
+        if resp.can_recover {
+            tracing::info!(
+                worker_id = %self.worker_id,
+                job_id,
+                checkpoint_path = %resp.checkpoint_path,
+                shard_count = resp.assigned_shards.len(),
+                "resuming from checkpoint"
+            );
+            Ok(Some((resp.checkpoint_path, resp.assigned_shards)))
+        } else {
+            Ok(None)
+        }
     }
 }

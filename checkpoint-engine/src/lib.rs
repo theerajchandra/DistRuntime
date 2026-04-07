@@ -4,6 +4,9 @@ pub use storage::CheckpointStorage;
 pub mod registry;
 pub use registry::{CheckpointMetadata, CheckpointRegistry};
 
+pub mod resume;
+pub use resume::ResumeInfo;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -85,6 +88,13 @@ impl CheckpointEngine {
     pub fn with_registry(mut self, r: CheckpointRegistry) -> Self {
         self.registry = Some(Arc::new(std::sync::Mutex::new(r)));
         self
+    }
+
+    /// Return a cloned handle to the checkpoint registry, if one was attached.
+    pub fn checkpoint_registry(
+        &self,
+    ) -> Option<Arc<std::sync::Mutex<registry::CheckpointRegistry>>> {
+        self.registry.clone()
     }
 
     /// Start a new checkpoint for `job_id` at the given `epoch` and `step`.

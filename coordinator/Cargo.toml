@@ -22,3 +22,4 @@ tracing-subscriber.workspace = true
 tempfile.workspace = true
 tokio-stream.workspace = true
 worker-client.workspace = true
+checkpoint-engine.workspace = true
