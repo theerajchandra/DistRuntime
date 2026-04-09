@@ -46,6 +46,7 @@ message HeartbeatRequest {
   uint64 epoch = 2;
   uint64 step = 3;
   float throughput_samples_per_sec = 4;
+  float throughput_bytes_per_sec = 5;
 }
 
 // Current shard ranges for one dataset assigned to this worker (after registration / rebalance).

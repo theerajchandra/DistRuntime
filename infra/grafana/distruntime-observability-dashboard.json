@@ -1,0 +1,107 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "targets": [
+        {
+          "expr": "distruntime_shard_read_bytes_per_sec",
+          "legendFormat": "{{worker_id}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Shard Read Throughput (bytes/s)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "targets": [
+        {
+          "expr": "distruntime_shard_read_records_per_sec",
+          "legendFormat": "{{worker_id}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Shard Read Throughput (records/s)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "id": 3,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(distruntime_checkpoint_write_latency_seconds_bucket[$__rate_interval])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(distruntime_checkpoint_write_latency_seconds_bucket[$__rate_interval])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(distruntime_checkpoint_write_latency_seconds_bucket[$__rate_interval])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "title": "Checkpoint Write Latency (p50/p95/p99)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "none"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 8},
+      "id": 4,
+      "targets": [
+        {
+          "expr": "distruntime_worker_count",
+          "legendFormat": "alive workers",
+          "refId": "A"
+        }
+      ],
+      "title": "Alive Worker Count",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "percentunit"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 8},
+      "id": 5,
+      "targets": [
+        {
+          "expr": "distruntime_heartbeat_miss_rate",
+          "legendFormat": "miss rate",
+          "refId": "A"
+        }
+      ],
+      "title": "Heartbeat Miss Rate",
+      "type": "stat"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["distruntime", "observability"],
+  "templating": {"list": []},
+  "time": {"from": "now-30m", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "DistRuntime Observability",
+  "uid": "distruntime-observability",
+  "version": 1,
+  "weekStart": ""
+}

@@ -4,6 +4,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use axum::http::{header, HeaderValue, StatusCode};
+use axum::response::IntoResponse;
+use axum::routing::get;
 use clap::{Parser, Subcommand};
 use proto_gen::distruntime::coordinator_service_client::CoordinatorServiceClient;
 use proto_gen::distruntime::{
@@ -49,6 +52,9 @@ enum Commands {
         /// Heartbeat interval used for worker liveness (also scales dead threshold).
         #[arg(long, default_value_t = 1000)]
         heartbeat_interval_ms: u64,
+        /// Optional Prometheus metrics HTTP address (serves /metrics).
+        #[arg(long, default_value = "127.0.0.1:9090")]
+        metrics_listen: String,
     },
     Job {
         #[command(subcommand)]
@@ -81,6 +87,10 @@ enum CheckpointCmd {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
+        .json()
+        .flatten_event(true)
+        .with_current_span(true)
+        .with_span_list(true)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
@@ -94,8 +104,10 @@ async fn main() -> Result<()> {
             listen,
             registry_path,
             heartbeat_interval_ms,
+            metrics_listen,
         } => {
-            run_coordinator_server(listen, registry_path, heartbeat_interval_ms).await?;
+            run_coordinator_server(listen, registry_path, heartbeat_interval_ms, metrics_listen)
+                .await?;
         }
         Commands::Job { job } => {
             let mut client = connect_client(&cli.coordinator).await?;
@@ -185,6 +197,7 @@ async fn run_coordinator_server(
     listen: String,
     registry_path: Option<PathBuf>,
     heartbeat_interval_ms: u64,
+    metrics_listen: String,
 ) -> Result<()> {
     let hb = Duration::from_millis(heartbeat_interval_ms.max(1));
     let tracker = LivenessTracker::new(hb);
@@ -200,6 +213,7 @@ async fn run_coordinator_server(
         .with_context(|| format!("bind {listen}"))?;
     let addr = listener.local_addr()?;
     tracing::info!(%addr, "coordinator listening");
+    spawn_metrics_server(metrics_listen);
 
     let svc = CoordinatorServiceImpl::new(tracker, registry, engine);
     Server::builder()
@@ -208,4 +222,36 @@ async fn run_coordinator_server(
         .await
         .context("coordinator server error")?;
     Ok(())
+}
+
+fn spawn_metrics_server(metrics_listen: String) {
+    tokio::spawn(async move {
+        let app = axum::Router::new().route(
+            "/metrics",
+            get(|| async {
+                let payload = coordinator::render_prometheus_metrics();
+                (
+                    StatusCode::OK,
+                    [(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("text/plain; version=0.0.4"),
+                    )],
+                    payload,
+                )
+                    .into_response()
+            }),
+        );
+
+        match tokio::net::TcpListener::bind(&metrics_listen).await {
+            Ok(listener) => {
+                tracing::info!(metrics_addr = %metrics_listen, "prometheus metrics endpoint ready");
+                if let Err(err) = axum::serve(listener, app).await {
+                    tracing::error!(error = %err, metrics_addr = %metrics_listen, "metrics server exited");
+                }
+            }
+            Err(err) => {
+                tracing::error!(error = %err, metrics_addr = %metrics_listen, "failed to bind metrics endpoint");
+            }
+        }
+    });
 }

@@ -1,3 +1,8 @@
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
 use proto_gen::distruntime::coordinator_service_server::CoordinatorService;
 use proto_gen::distruntime::{
     CheckpointAbortRequest, CheckpointAbortResponse, CheckpointBeginRequest,
@@ -12,6 +17,7 @@ use tonic::{Request, Response, Status};
 
 use checkpoint_engine::{CheckpointEngine, CheckpointError};
 
+use crate::metrics;
 use crate::registry::DatasetRegistry;
 use crate::shard_map;
 use crate::tracker::LivenessTracker;
@@ -20,6 +26,7 @@ pub struct CoordinatorServiceImpl {
     tracker: LivenessTracker,
     registry: DatasetRegistry,
     checkpoint_engine: CheckpointEngine,
+    checkpoint_started: Arc<tokio::sync::Mutex<HashMap<String, Instant>>>,
 }
 
 impl CoordinatorServiceImpl {
@@ -32,6 +39,7 @@ impl CoordinatorServiceImpl {
             tracker,
             registry,
             checkpoint_engine,
+            checkpoint_started: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 }
@@ -42,6 +50,12 @@ impl CoordinatorService for CoordinatorServiceImpl {
         &self,
         request: Request<HeartbeatRequest>,
     ) -> Result<Response<HeartbeatResponse>, Status> {
+        let correlation_id = correlation_id_for_request(&request, None);
+        let _span = tracing::info_span!(
+            "coordinator.heartbeat",
+            correlation_id = %correlation_id
+        )
+        .entered();
         let req = request.into_inner();
         let known = self.tracker.record_heartbeat(&req.worker_id).await;
         if !known {
@@ -56,6 +70,11 @@ impl CoordinatorService for CoordinatorServiceImpl {
             .into_iter()
             .map(|(dataset_id, shards)| DatasetShardAssignment { dataset_id, shards })
             .collect();
+        metrics::observe_worker_throughput(
+            &req.worker_id,
+            req.throughput_bytes_per_sec as f64,
+            req.throughput_samples_per_sec as f64,
+        );
 
         Ok(Response::new(HeartbeatResponse {
             acknowledged: true,
@@ -69,6 +88,12 @@ impl CoordinatorService for CoordinatorServiceImpl {
         &self,
         request: Request<WorkerReadyRequest>,
     ) -> Result<Response<WorkerReadyResponse>, Status> {
+        let correlation_id = correlation_id_for_request(&request, None);
+        let _span = tracing::info_span!(
+            "coordinator.worker_ready",
+            correlation_id = %correlation_id
+        )
+        .entered();
         let req = request.into_inner();
         let info = req
             .info
@@ -96,7 +121,16 @@ impl CoordinatorService for CoordinatorServiceImpl {
         &self,
         request: Request<RegisterDatasetRequest>,
     ) -> Result<Response<RegisterDatasetResponse>, Status> {
+        let incoming_correlation_id = correlation_id_from_metadata(&request);
         let req = request.into_inner();
+        let correlation_id =
+            incoming_correlation_id.unwrap_or_else(|| fresh_correlation_id(Some(&req.job_id)));
+        let _span = tracing::info_span!(
+            "coordinator.register_dataset",
+            correlation_id = %correlation_id,
+            job_id = %req.job_id
+        )
+        .entered();
 
         if req.uri.is_empty() {
             return Err(Status::invalid_argument("dataset uri is required"));
@@ -129,7 +163,16 @@ impl CoordinatorService for CoordinatorServiceImpl {
         &self,
         request: Request<CheckpointBeginRequest>,
     ) -> Result<Response<CheckpointBeginResponse>, Status> {
+        let incoming_correlation_id = correlation_id_from_metadata(&request);
         let req = request.into_inner();
+        let correlation_id =
+            incoming_correlation_id.unwrap_or_else(|| fresh_correlation_id(Some(&req.job_id)));
+        let _span = tracing::info_span!(
+            "coordinator.checkpoint_begin",
+            correlation_id = %correlation_id,
+            job_id = %req.job_id
+        )
+        .entered();
         let alive = self.tracker.alive_worker_ids().await;
         if alive.is_empty() {
             return Err(Status::failed_precondition(
@@ -140,6 +183,10 @@ impl CoordinatorService for CoordinatorServiceImpl {
             .checkpoint_engine
             .begin(&req.job_id, req.epoch, req.step, alive)
             .await;
+        self.checkpoint_started
+            .lock()
+            .await
+            .insert(checkpoint_id.clone(), Instant::now());
         tracing::info!(checkpoint_id = %checkpoint_id, job_id = %req.job_id, epoch = req.epoch, step = req.step, "checkpoint begun");
         Ok(Response::new(CheckpointBeginResponse {
             checkpoint_id,
@@ -151,7 +198,14 @@ impl CoordinatorService for CoordinatorServiceImpl {
         &self,
         request: Request<CheckpointCommitRequest>,
     ) -> Result<Response<CheckpointCommitResponse>, Status> {
+        let correlation_id = correlation_id_for_request(&request, None);
         let req = request.into_inner();
+        let _span = tracing::info_span!(
+            "coordinator.checkpoint_commit",
+            correlation_id = %correlation_id,
+            checkpoint_id = %req.checkpoint_id
+        )
+        .entered();
         let all_done = self
             .checkpoint_engine
             .worker_commit(&req.checkpoint_id, &req.worker_id, req.bytes_written)
@@ -161,6 +215,11 @@ impl CoordinatorService for CoordinatorServiceImpl {
                 CheckpointError::InvalidState(_) => Status::failed_precondition(e.to_string()),
                 CheckpointError::AlreadyCommitted(_) => Status::already_exists(e.to_string()),
             })?;
+        if all_done {
+            if let Some(started_at) = self.checkpoint_started.lock().await.remove(&req.checkpoint_id) {
+                metrics::observe_checkpoint_write_latency(started_at.elapsed().as_secs_f64());
+            }
+        }
         Ok(Response::new(CheckpointCommitResponse {
             success: all_done,
         }))
@@ -170,11 +229,19 @@ impl CoordinatorService for CoordinatorServiceImpl {
         &self,
         request: Request<CheckpointAbortRequest>,
     ) -> Result<Response<CheckpointAbortResponse>, Status> {
+        let correlation_id = correlation_id_for_request(&request, None);
         let req = request.into_inner();
+        let _span = tracing::info_span!(
+            "coordinator.checkpoint_abort",
+            correlation_id = %correlation_id,
+            checkpoint_id = %req.checkpoint_id
+        )
+        .entered();
         let acknowledged = self
             .checkpoint_engine
             .abort(&req.checkpoint_id, &req.reason)
             .await;
+        self.checkpoint_started.lock().await.remove(&req.checkpoint_id);
         Ok(Response::new(CheckpointAbortResponse { acknowledged }))
     }
 
@@ -182,7 +249,16 @@ impl CoordinatorService for CoordinatorServiceImpl {
         &self,
         request: Request<RecoverWorkerRequest>,
     ) -> Result<Response<RecoverWorkerResponse>, Status> {
+        let incoming_correlation_id = correlation_id_from_metadata(&request);
         let req = request.into_inner();
+        let correlation_id = incoming_correlation_id
+            .unwrap_or_else(|| fresh_correlation_id(Some(&req.last_checkpoint_id)));
+        let _span = tracing::info_span!(
+            "coordinator.recover_worker",
+            correlation_id = %correlation_id,
+            job_id = %req.last_checkpoint_id
+        )
+        .entered();
         // last_checkpoint_id carries the job_id on restart
         let job_id = &req.last_checkpoint_id;
 
@@ -247,8 +323,17 @@ impl CoordinatorService for CoordinatorServiceImpl {
         &self,
         request: Request<GetJobStatusRequest>,
     ) -> Result<Response<GetJobStatusResponse>, Status> {
+        let incoming_correlation_id = correlation_id_from_metadata(&request);
         let req = request.into_inner();
         let job_id = req.job_id;
+        let correlation_id =
+            incoming_correlation_id.unwrap_or_else(|| fresh_correlation_id(Some(&job_id)));
+        let _span = tracing::info_span!(
+            "coordinator.get_job_status",
+            correlation_id = %correlation_id,
+            job_id = %job_id
+        )
+        .entered();
         let datasets: Vec<DatasetSummary> = self
             .registry
             .list_for_job(&job_id)
@@ -276,8 +361,17 @@ impl CoordinatorService for CoordinatorServiceImpl {
         &self,
         request: Request<ListCheckpointsRequest>,
     ) -> Result<Response<ListCheckpointsResponse>, Status> {
+        let incoming_correlation_id = correlation_id_from_metadata(&request);
         let req = request.into_inner();
         let job_id = req.job_id;
+        let correlation_id =
+            incoming_correlation_id.unwrap_or_else(|| fresh_correlation_id(Some(&job_id)));
+        let _span = tracing::info_span!(
+            "coordinator.list_checkpoints",
+            correlation_id = %correlation_id,
+            job_id = %job_id
+        )
+        .entered();
         let checkpoints: Vec<CheckpointEntry> = match self.checkpoint_engine.checkpoint_registry() {
             None => vec![],
             Some(reg) => {
@@ -303,8 +397,15 @@ impl CoordinatorService for CoordinatorServiceImpl {
         &self,
         request: Request<GetCheckpointRestoreInfoRequest>,
     ) -> Result<Response<GetCheckpointRestoreInfoResponse>, Status> {
+        let correlation_id = correlation_id_for_request(&request, None);
         let req = request.into_inner();
         let version = req.version;
+        let _span = tracing::info_span!(
+            "coordinator.get_checkpoint_restore_info",
+            correlation_id = %correlation_id,
+            version
+        )
+        .entered();
         let meta = match self.checkpoint_engine.checkpoint_registry() {
             None => None,
             Some(reg) => {
@@ -347,4 +448,33 @@ fn uuid_v4_simple() -> String {
         .unwrap()
         .as_nanos();
     format!("{t:x}")
+}
+
+fn correlation_id_for_request<T>(request: &Request<T>, job_id: Option<&str>) -> String {
+    correlation_id_from_metadata(request).unwrap_or_else(|| fresh_correlation_id(job_id))
+}
+
+fn correlation_id_from_metadata<T>(request: &Request<T>) -> Option<String> {
+    request
+        .metadata()
+        .get("x-correlation-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn fresh_correlation_id(job_id: Option<&str>) -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let nonce = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let now_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    match job_id {
+        Some(job_id) if !job_id.is_empty() => {
+            format!("job-{job_id}-{now_nanos:x}-{nonce:x}")
+        }
+        _ => format!("corr-{now_nanos:x}-{nonce:x}"),
+    }
 }

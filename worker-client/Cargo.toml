@@ -11,4 +11,7 @@ tonic-prost.workspace = true
 prost.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+once_cell.workspace = true
+prometheus.workspace = true
+axum.workspace = true
 proto-gen.workspace = true

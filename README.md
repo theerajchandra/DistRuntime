@@ -52,7 +52,7 @@ Training a large model across hundreds of GPU workers introduces problems that n
 | Coordination | etcd (via openraft) |
 | Object storage | S3-compatible (MinIO locally, DO Spaces in prod) |
 | Metadata | Postgres |
-| Observability | Datadog (metrics, APM, logs) |
+| Observability | Prometheus + Grafana + JSON logs |
 | CI | GitHub Actions |
 
 ---
@@ -173,6 +173,32 @@ Tracked on [Jira](https://theeraj.atlassian.net/browse/DIST-1).
 | `make check` | Format check + clippy + tests (CI equivalent) |
 | `make proto` | Rebuild protobuf codegen |
 | `make clean` | Remove build artifacts |
+
+---
+
+## Observability metrics
+
+Prometheus metrics are exposed from the coordinator at `/metrics` (default bind `127.0.0.1:9090`).
+Worker-side metrics are available through `worker_client::spawn_metrics_server(...)`.
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `distruntime_shard_read_bytes_per_sec` | gauge | `worker_id` | Latest shard read throughput in bytes/s reported by each worker heartbeat. |
+| `distruntime_shard_read_records_per_sec` | gauge | `worker_id` | Latest shard read throughput in records/s reported by each worker heartbeat. |
+| `distruntime_checkpoint_write_latency_seconds` | histogram | none | End-to-end checkpoint write latency from begin to fully committed. |
+| `distruntime_worker_count` | gauge | none | Alive worker count tracked by coordinator liveness state. |
+| `distruntime_heartbeat_miss_rate` | gauge | none | Heartbeat miss ratio, computed as misses / (heartbeats + misses). |
+| `distruntime_heartbeat_misses_total` | counter | none | Total workers marked failed for missed heartbeat deadlines. |
+| `distruntime_heartbeats_total` | counter | none | Total successful coordinator heartbeat updates. |
+| `distruntime_worker_shard_read_bytes_per_sec` | gauge | none | Latest local worker shard read throughput in bytes/s. |
+| `distruntime_worker_shard_read_records_per_sec` | gauge | none | Latest local worker shard read throughput in records/s. |
+| `distruntime_worker_heartbeats_sent_total` | counter | none | Total worker heartbeat RPC attempts. |
+| `distruntime_worker_heartbeat_failures_total` | counter | none | Total worker heartbeat RPC failures. |
+
+For percentile queries, use `histogram_quantile` over `distruntime_checkpoint_write_latency_seconds_bucket`:
+- p50: `histogram_quantile(0.50, sum(rate(distruntime_checkpoint_write_latency_seconds_bucket[5m])) by (le))`
+- p95: `histogram_quantile(0.95, sum(rate(distruntime_checkpoint_write_latency_seconds_bucket[5m])) by (le))`
+- p99: `histogram_quantile(0.99, sum(rate(distruntime_checkpoint_write_latency_seconds_bucket[5m])) by (le))`
 
 ---
 

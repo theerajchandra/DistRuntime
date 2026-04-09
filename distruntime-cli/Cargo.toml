@@ -19,6 +19,7 @@ proto-gen.workspace = true
 coordinator.workspace = true
 checkpoint-engine.workspace = true
 tokio-stream.workspace = true
+axum.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

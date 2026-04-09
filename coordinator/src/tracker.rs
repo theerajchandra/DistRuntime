@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 
+use crate::metrics;
 use crate::registry::DatasetRegistry;
 
 #[derive(Debug, Clone)]
@@ -60,6 +61,8 @@ impl LivenessTracker {
                 alive: true,
             },
         );
+        let alive = state.workers.values().filter(|w| w.alive).count() as u32;
+        metrics::set_worker_count(alive);
     }
 
     pub async fn record_heartbeat(&self, worker_id: &str) -> bool {
@@ -67,6 +70,7 @@ impl LivenessTracker {
         if let Some(entry) = state.workers.get_mut(worker_id) {
             entry.last_seen = Instant::now();
             entry.alive = true;
+            metrics::inc_heartbeat();
             true
         } else {
             false
@@ -124,10 +128,13 @@ impl LivenessTracker {
                         );
                     }
                     state.failed_workers.extend(newly_failed.iter().cloned());
+                    let alive = state.workers.values().filter(|w| w.alive).count() as u32;
+                    metrics::set_worker_count(alive);
                     newly_failed
                 };
 
                 if !newly_failed.is_empty() {
+                    metrics::inc_heartbeat_misses(newly_failed.len() as u64);
                     if let Some(reg) = registry.clone() {
                         let alive = {
                             let state = inner.lock().await;
