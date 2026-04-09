@@ -4,6 +4,8 @@ A high-performance distributed runtime for coordinating data loading, checkpoint
 
 Built with a Rust core for all I/O-critical paths and a Python surface for ML engineer ergonomics.
 
+![DistRuntime demo](assets/demo.gif)
+
 ---
 
 ## What it does
