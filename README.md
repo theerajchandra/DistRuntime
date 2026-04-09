@@ -176,6 +176,21 @@ Tracked on [Jira](https://theeraj.atlassian.net/browse/DIST-1).
 
 ---
 
+## Profiling and Benchmarking
+
+Hot-path profiling and regression benchmarking for `data-loader`:
+
+- Run profiling + flamegraph artifacts:
+  - `infra/profiling/run_hot_path_profiling.sh`
+- Criterion benchmark (same command used in CI):
+  - `cargo bench -p data-loader --bench hot_path -- --noplot`
+- Artifacts:
+  - `infra/profiling/hot-path-before.svg`
+  - `infra/profiling/hot-path-after.svg`
+  - `infra/profiling/hot-path-report.md`
+
+---
+
 ## Observability metrics
 
 Prometheus metrics are exposed from the coordinator at `/metrics` (default bind `127.0.0.1:9090`).

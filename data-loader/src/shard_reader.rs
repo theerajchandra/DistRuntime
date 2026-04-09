@@ -7,8 +7,7 @@ use crate::stream::ByteStream;
 
 /// Format-aware reader that consumes a [`ByteStream`] and yields [`Record`] items.
 pub struct ShardReader {
-    records: Vec<Record>,
-    cursor: usize,
+    records: std::vec::IntoIter<Record>,
 }
 
 impl ShardReader {
@@ -19,7 +18,9 @@ impl ShardReader {
     ) -> Result<Self> {
         let raw = stream.read_all().await?;
         let records = plugin.decode_shard(raw)?;
-        Ok(Self { records, cursor: 0 })
+        Ok(Self {
+            records: records.into_iter(),
+        })
     }
 
     /// Convenience for built-in formats.
@@ -32,12 +33,6 @@ impl ShardReader {
 
     /// Return the next record, or `None` if the shard is exhausted.
     pub fn next_record(&mut self) -> Option<Record> {
-        if self.cursor < self.records.len() {
-            let r = self.records[self.cursor].clone();
-            self.cursor += 1;
-            Some(r)
-        } else {
-            None
-        }
+        self.records.next()
     }
 }

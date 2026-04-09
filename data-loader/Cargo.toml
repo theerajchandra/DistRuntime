@@ -19,3 +19,9 @@ arrow.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+criterion = "0.5"
+pprof = { version = "0.14", features = ["criterion", "flamegraph"] }
+
+[[bench]]
+name = "hot_path"
+harness = false

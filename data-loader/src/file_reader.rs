@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
+use bytes::BytesMut;
 use std::path::PathBuf;
 use tokio::io::AsyncReadExt;
 
@@ -12,6 +13,7 @@ const DEFAULT_BUF_SIZE: usize = 64 * 1024; // 64 KiB
 pub struct FileReader {
     reader: tokio::io::BufReader<tokio::fs::File>,
     buf_size: usize,
+    scratch: BytesMut,
 }
 
 impl FileReader {
@@ -22,19 +24,24 @@ impl FileReader {
     pub async fn open_with_buf_size(path: impl Into<PathBuf>, buf_size: usize) -> Result<Self> {
         let file = tokio::fs::File::open(path.into()).await?;
         let reader = tokio::io::BufReader::with_capacity(buf_size, file);
-        Ok(Self { reader, buf_size })
+        Ok(Self {
+            reader,
+            buf_size,
+            scratch: BytesMut::with_capacity(buf_size),
+        })
     }
 }
 
 #[async_trait]
 impl ByteStream for FileReader {
     async fn next_chunk(&mut self) -> Result<Option<Bytes>> {
-        let mut buf = vec![0u8; self.buf_size];
-        let n = self.reader.read(&mut buf).await?;
+        self.scratch.resize(self.buf_size, 0);
+        let n = self.reader.read(&mut self.scratch[..]).await?;
         if n == 0 {
+            self.scratch.clear();
             return Ok(None);
         }
-        buf.truncate(n);
-        Ok(Some(Bytes::from(buf)))
+        self.scratch.truncate(n);
+        Ok(Some(self.scratch.split().freeze()))
     }
 }

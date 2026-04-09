@@ -60,12 +60,19 @@ impl ParallelShardReader {
             let plugin = plugin.clone();
 
             tokio::spawn(async move {
-                let result = Self::read_shard(path, plugin).await;
-                match result {
-                    Ok(records) => {
-                        for r in records {
-                            if tx.send(Ok(r)).await.is_err() {
-                                break;
+                match FileReader::open(&path).await {
+                    Ok(file_reader) => {
+                        let stream: Box<dyn ByteStream> = Box::new(file_reader);
+                        match ShardReader::load(stream, plugin).await {
+                            Ok(mut reader) => {
+                                while let Some(record) = reader.next_record() {
+                                    if tx.send(Ok(record)).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                let _ = tx.send(Err(e)).await;
                             }
                         }
                     }
@@ -113,15 +120,5 @@ impl ParallelShardReader {
     /// Get the next record. Returns `None` when all shards are exhausted.
     pub async fn next_record(&mut self) -> Option<Result<Record>> {
         self.rx.recv().await
-    }
-
-    async fn read_shard(path: PathBuf, plugin: Arc<dyn RecordFormatPlugin>) -> Result<Vec<Record>> {
-        let stream: Box<dyn ByteStream> = Box::new(FileReader::open(&path).await?);
-        let mut reader = ShardReader::load(stream, plugin).await?;
-        let mut records = Vec::new();
-        while let Some(r) = reader.next_record() {
-            records.push(r);
-        }
-        Ok(records)
     }
 }
