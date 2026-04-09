@@ -92,10 +92,15 @@ impl ShardIterator {
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        let reader = match prefetch {
-            Some(p) => ParallelShardReader::open_plugin(desc, plugin_arc, p),
-            None => {
-                ParallelShardReader::open_plugin(desc, plugin_arc, data_loader::prefetch_depth())
+        let reader = {
+            let _guard = runtime.enter();
+            match prefetch {
+                Some(p) => ParallelShardReader::open_plugin(desc, plugin_arc, p),
+                None => ParallelShardReader::open_plugin(
+                    desc,
+                    plugin_arc,
+                    data_loader::prefetch_depth(),
+                ),
             }
         };
 
@@ -563,8 +568,10 @@ impl Dataset {
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        let reader =
-            ParallelShardReader::open_plugin(desc, Arc::new(fmt), data_loader::prefetch_depth());
+        let reader = {
+            let _guard = runtime.enter();
+            ParallelShardReader::open_plugin(desc, Arc::new(fmt), data_loader::prefetch_depth())
+        };
 
         Ok(DatasetIterator {
             reader: Some(reader),
@@ -927,4 +934,103 @@ fn distruntime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<BatchIterator>()?;
     m.add_class::<Checkpoint>()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pyo3::exceptions::PyStopIteration;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn write_sample_jsonl_shards() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("distruntime-py-runtime-{unique}"));
+        fs::create_dir_all(&base).unwrap();
+        fs::write(base.join("shard-0.jsonl"), b"{\"x\":1}\n{\"x\":2}\n").unwrap();
+        fs::write(base.join("shard-1.jsonl"), b"{\"x\":3}\n{\"x\":4}\n").unwrap();
+        base
+    }
+
+    fn ensure_python() {
+        Python::initialize();
+    }
+
+    fn collect_dataset_values(mut iter: DatasetIterator) -> Vec<i64> {
+        Python::attach(|py| {
+            let mut values = Vec::new();
+            loop {
+                match iter.__next__(py) {
+                    Ok(obj) => {
+                        let row: HashMap<String, i64> = obj.bind(py).extract().unwrap();
+                        values.push(*row.get("x").unwrap());
+                    }
+                    Err(err) if err.is_instance_of::<PyStopIteration>(py) => break,
+                    Err(err) => panic!("unexpected python error: {err}"),
+                }
+            }
+            values
+        })
+    }
+
+    fn collect_shard_values(mut iter: ShardIterator) -> Vec<i64> {
+        Python::attach(|py| {
+            let mut values = Vec::new();
+            loop {
+                match iter.__next__(py) {
+                    Ok(obj) => {
+                        let row: HashMap<String, i64> = obj.bind(py).extract().unwrap();
+                        values.push(*row.get("x").unwrap());
+                    }
+                    Err(err) if err.is_instance_of::<PyStopIteration>(py) => break,
+                    Err(err) => panic!("unexpected python error: {err}"),
+                }
+            }
+            values
+        })
+    }
+
+    #[test]
+    fn dataset_iterator_reads_without_external_tokio_context() {
+        ensure_python();
+        let base = write_sample_jsonl_shards();
+        let dataset = Dataset {
+            dataset_id: "ds-test".to_string(),
+            uri: base.display().to_string(),
+            format: "jsonl".to_string(),
+            num_shards: 2,
+            shard_indices: vec![0, 1],
+        };
+
+        let mut values = collect_dataset_values(dataset.__iter__().unwrap());
+        values.sort_unstable();
+        assert_eq!(values, vec![1, 2, 3, 4]);
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn shard_iterator_reads_without_external_tokio_context() {
+        ensure_python();
+        let base = write_sample_jsonl_shards();
+        let mut values = collect_shard_values(
+            ShardIterator::new(
+                base.to_str().unwrap(),
+                vec![0, 1],
+                Some("jsonl"),
+                "jsonl",
+                Some(2),
+                None,
+            )
+            .unwrap(),
+        );
+        values.sort_unstable();
+        assert_eq!(values, vec![1, 2, 3, 4]);
+
+        fs::remove_dir_all(base).unwrap();
+    }
 }
