@@ -20,26 +20,31 @@ Training a large model across hundreds of GPU workers introduces problems that n
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│              Python API layer               │
-│  register_dataset() · save() · load()       │
-└────────────────────┬────────────────────────┘
+┌──────────────────────────────────────────────┐
+│            Python API + CLI surface          │
+│ Runtime · Dataset · Checkpoint · distruntime │
+└────────────────────┬─────────────────────────┘
                      │ gRPC / HTTP2
-┌────────────────────▼────────────────────────┐
-│         Coordinator service (Rust)          │
-│   Shard assignment · heartbeats · election  │
-└──────┬─────────────┬──────────────┬─────────┘
-       │             │              │
-┌──────▼──────┐ ┌────▼─────┐ ┌─────▼──────┐
-│  Worker 0   │ │ Worker 1 │ │ Worker N   │
-│ Data reader │ │ Ckpt I/O │ │  Recovery  │
-└──────┬──────┘ └────┬─────┘ └─────┬──────┘
-       │             │              │
-┌──────▼─────────────▼──────────────▼───────┐
-│              Storage layer                 │
-│   Object storage (S3) · etcd · Postgres   │
-└────────────────────────────────────────────┘
+┌────────────────────▼─────────────────────────┐
+│         Coordinator service (Rust)           │
+│ Worker registration · heartbeats · shard map │
+│ checkpoint RPCs · recovery · Prometheus      │
+└───────────────┬────────────────────┬─────────┘
+                │                    │
+┌───────────────▼──────────────┐ ┌───▼──────────────────┐
+│ Worker process / Python app  │ │ CLI + observability  │
+│ worker-client + data-loader  │ │ job status · ckpt ls │
+│ dataset iteration · ckpt I/O │ │ restore info         │
+└───────────────┬──────────────┘ └──────────────────────┘
+                │
+┌───────────────▼────────────────────────────────────────┐
+│                Storage and local state                 │
+│ local shard files · S3-compatible object storage       │
+│ optional JSON-backed dataset registry persistence      │
+└────────────────────────────────────────────────────────┘
 ```
+
+The current implementation is a single Rust coordinator plus worker-side clients. There is no `etcd`, `openraft`, or Postgres metadata/control plane in the repo today.
 
 ---
 
@@ -47,13 +52,15 @@ Training a large model across hundreds of GPU workers introduces problems that n
 
 | Layer | Technology |
 |---|---|
-| Core runtime | Rust (tokio async, tonic gRPC) |
+| Core runtime | Rust 2021, Tokio, Tonic gRPC, Prost |
+| Coordinator CLI | `clap` + `axum` |
 | Python bindings | PyO3 + maturin |
-| Coordination | etcd (via openraft) |
-| Object storage | S3-compatible (MinIO locally, DO Spaces in prod) |
-| Metadata | Postgres |
-| Observability | Prometheus + Grafana + JSON logs |
-| CI | GitHub Actions |
+| Data layer | Apache Arrow, Parquet, bytes, Tokio async file I/O |
+| Storage backends | Local filesystem and S3-compatible object storage via the AWS SDK for Rust |
+| State persistence | In-memory coordinator state with optional JSON-backed dataset registry persistence and Rust checkpoint registries |
+| Observability | `tracing` / `tracing-subscriber` JSON logs, Prometheus, Grafana |
+| Profiling and benchmarks | Criterion, `pprof`, flamegraphs |
+| CI | GitHub Actions + maturin wheel builds |
 
 ---
 
@@ -61,16 +68,18 @@ Training a large model across hundreds of GPU workers introduces problems that n
 
 ```
 DistRuntime/
-├── coordinator/          # Coordinator gRPC server
-├── worker-client/        # Worker-side runtime client
-├── checkpoint-engine/    # Two-phase checkpoint protocol
-├── data-loader/          # Async sharded data reader
-├── proto-gen/            # Protobuf definitions and codegen
-├── py-runtime/           # PyO3 Python bindings
-├── proto/
-│   └── distruntime.proto
-├── .github/
-│   └── workflows/ci.yml
+├── coordinator/          # Coordinator service, shard mapping, liveness, metrics
+├── worker-client/        # Worker registration, heartbeats, shard watches
+├── checkpoint-engine/    # Two-phase checkpoint engine and checkpoint registry
+├── data-loader/          # File/S3 readers, format plugins, benches, tests
+├── distruntime-cli/      # Coordinator runner and admin CLI
+├── py-runtime/           # Python package, type hints, maturin config
+├── proto/                # Protobuf schema
+├── proto-gen/            # Generated Rust protobuf / gRPC bindings
+├── infra/grafana/        # Grafana dashboard
+├── infra/load-test/      # Load / chaos test runner and reports
+├── infra/profiling/      # Profiling runner, flamegraphs, benchmark report
+├── .github/workflows/    # CI, wheel builds, regression benchmarks
 ├── Makefile
 ├── Cargo.toml
 ├── clippy.toml
@@ -86,64 +95,86 @@ DistRuntime/
 - Rust stable toolchain
 - Python 3.10+
 - `protoc` (Protocol Buffers compiler) — `brew install protobuf`
-- etcd, MinIO, Postgres — `brew install etcd minio/stable/minio postgresql`
+- `maturin` for the Python extension — `python -m pip install maturin`
+- Optional S3-compatible local testing: MinIO — `brew install minio/stable/minio`
 
-### Build
+### Build and install
 
 ```bash
-# Clone
 git clone https://github.com/theerajchandra/DistRuntime
 cd DistRuntime
 
-# Build all crates
-make build
+# Build and verify the Rust workspace
+cargo build --workspace
+make check
 
-# Run tests
-make test
-
-# Lint
-make lint
+# Install the Python package into the current environment
+maturin develop -m py-runtime/Cargo.toml
 ```
 
-### Local dev services
+### Run the coordinator
 
 ```bash
-# Start etcd
-etcd &
+cargo run -p distruntime-cli -- start-coordinator \
+  --listen 127.0.0.1:8787 \
+  --metrics-listen 127.0.0.1:9090 \
+  --registry-path ./registry.json
 
-# Start MinIO
-minio server ~/minio-data &
-
-# Start Postgres
-brew services start postgresql
+export DISTRUNTIME_COORDINATOR=http://127.0.0.1:8787
 ```
 
-Set `STORAGE_ENDPOINT=http://localhost:9000` to point the data-loader at local MinIO.
+### Optional local S3-compatible storage
+
+```bash
+minio server ~/minio-data &
+export STORAGE_ENDPOINT=http://127.0.0.1:9000
+```
+
+### Example shard layout
+
+The high-level Python `Dataset` API expects shards laid out under a local directory as:
+
+```text
+sample-data/
+  shard-0.jsonl
+  shard-1.jsonl
+  shard-2.jsonl
+```
 
 ---
 
-## Python API (in progress)
+## Python API
 
 ```python
 from distruntime import Runtime
 
-rt = Runtime(coordinator_addr="grpc://localhost:50051", job_id="run-01")
+rt = Runtime("http://127.0.0.1:8787", "run-01")
 
-# Register a dataset — coordinator assigns shards across workers
-ds = rt.register_dataset("s3://bucket/data/", num_shards=512, format="parquet")
+# Register a dataset rooted at a local shard directory.
+# Files are expected to look like ./sample-data/shard-0.jsonl, shard-1.jsonl, ...
+ds = rt.register_dataset("./sample-data", num_shards=3, format="jsonl")
 
-# Iterate batches
-for batch in ds.batches(batch_size=256):
-    loss = train_step(batch)
+# Iterate individual records
+for record in ds:
+    train_step(record)
 
-# Save a checkpoint
-ckpt = rt.register_checkpoint("s3://bucket/checkpoints/", keep_last=5)
-ckpt.save(model.state_dict(), step=global_step)
+# Or iterate batches
+for batch in ds.batches(batch_size=32):
+    train_batch(batch)
 
-# Resume
-state = ckpt.load(version="latest")
-model.load_state_dict(state)
+# Local async checkpoint save/load with retention
+ckpt = rt.register_checkpoint("./checkpoints", keep_last=5)
+ckpt.save({"step": 100, "model": model_state}, step=100)
+ckpt.wait()
+state = ckpt.load()
+
+# Coordinator-side recovery metadata, if available for this job
+recovery = rt.recover()
+
+rt.shutdown()
 ```
+
+The Python package also exposes `ShardIterator`, `CheckpointManager`, `DatasetIterator`, and `BatchIterator`.
 
 ---
 
@@ -151,12 +182,12 @@ model.load_state_dict(state)
 
 | Epic | Status |
 |---|---|
-| Epic 0 — Infrastructure & environment | In progress |
-| Epic 1 — Core Rust runtime | To do |
-| Epic 2 — Sharded data loading | To do |
-| Epic 3 — Fault-tolerant checkpointing | To do |
-| Epic 4 — Python API and bindings | To do |
-| Epic 5 — Observability and load testing | To do |
+| Epic 0 — Infrastructure & environment | Done |
+| Epic 1 — Core Rust runtime | Done |
+| Epic 2 — Sharded data loading | Done |
+| Epic 3 — Fault-tolerant checkpointing | Done |
+| Epic 4 — Python API and bindings | Done |
+| Epic 5 — Observability and load testing | Done |
 
 Tracked on [Jira](https://theeraj.atlassian.net/browse/DIST-1).
 
