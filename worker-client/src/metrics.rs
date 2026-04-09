@@ -44,9 +44,7 @@ impl WorkerMetrics {
 static METRICS: Lazy<WorkerMetrics> = Lazy::new(WorkerMetrics::new);
 
 pub fn observe_throughput(bytes_per_sec: f64, records_per_sec: f64) {
-    METRICS
-        .shard_read_bytes_per_sec
-        .set(bytes_per_sec.max(0.0));
+    METRICS.shard_read_bytes_per_sec.set(bytes_per_sec.max(0.0));
     METRICS
         .shard_read_records_per_sec
         .set(records_per_sec.max(0.0));

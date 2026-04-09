@@ -51,12 +51,12 @@ impl CoordinatorService for CoordinatorServiceImpl {
         request: Request<HeartbeatRequest>,
     ) -> Result<Response<HeartbeatResponse>, Status> {
         let correlation_id = correlation_id_for_request(&request, None);
-        let _span = tracing::info_span!(
-            "coordinator.heartbeat",
-            correlation_id = %correlation_id
-        )
-        .entered();
         let req = request.into_inner();
+        tracing::trace!(
+            correlation_id = %correlation_id,
+            worker_id = %req.worker_id,
+            "heartbeat received"
+        );
         let known = self.tracker.record_heartbeat(&req.worker_id).await;
         if !known {
             return Err(Status::not_found(format!(
@@ -89,11 +89,6 @@ impl CoordinatorService for CoordinatorServiceImpl {
         request: Request<WorkerReadyRequest>,
     ) -> Result<Response<WorkerReadyResponse>, Status> {
         let correlation_id = correlation_id_for_request(&request, None);
-        let _span = tracing::info_span!(
-            "coordinator.worker_ready",
-            correlation_id = %correlation_id
-        )
-        .entered();
         let req = request.into_inner();
         let info = req
             .info
@@ -109,7 +104,7 @@ impl CoordinatorService for CoordinatorServiceImpl {
             .register_worker(worker_id.clone(), info.address, info.port)
             .await;
 
-        tracing::info!(worker_id = %worker_id, "worker registered");
+        tracing::info!(correlation_id = %correlation_id, worker_id = %worker_id, "worker registered");
 
         Ok(Response::new(WorkerReadyResponse {
             accepted: true,
@@ -125,12 +120,6 @@ impl CoordinatorService for CoordinatorServiceImpl {
         let req = request.into_inner();
         let correlation_id =
             incoming_correlation_id.unwrap_or_else(|| fresh_correlation_id(Some(&req.job_id)));
-        let _span = tracing::info_span!(
-            "coordinator.register_dataset",
-            correlation_id = %correlation_id,
-            job_id = %req.job_id
-        )
-        .entered();
 
         if req.uri.is_empty() {
             return Err(Status::invalid_argument("dataset uri is required"));
@@ -151,7 +140,13 @@ impl CoordinatorService for CoordinatorServiceImpl {
             .register(req.job_id, req.uri, req.format, req.num_shards, assignments)
             .await;
 
-        tracing::info!(dataset_id = %dataset_id, num_shards = req.num_shards, workers = alive.len(), "dataset registered");
+        tracing::info!(
+            correlation_id = %correlation_id,
+            dataset_id = %dataset_id,
+            num_shards = req.num_shards,
+            workers = alive.len(),
+            "dataset registered"
+        );
 
         Ok(Response::new(RegisterDatasetResponse {
             dataset_id,
@@ -167,12 +162,6 @@ impl CoordinatorService for CoordinatorServiceImpl {
         let req = request.into_inner();
         let correlation_id =
             incoming_correlation_id.unwrap_or_else(|| fresh_correlation_id(Some(&req.job_id)));
-        let _span = tracing::info_span!(
-            "coordinator.checkpoint_begin",
-            correlation_id = %correlation_id,
-            job_id = %req.job_id
-        )
-        .entered();
         let alive = self.tracker.alive_worker_ids().await;
         if alive.is_empty() {
             return Err(Status::failed_precondition(
@@ -187,7 +176,14 @@ impl CoordinatorService for CoordinatorServiceImpl {
             .lock()
             .await
             .insert(checkpoint_id.clone(), Instant::now());
-        tracing::info!(checkpoint_id = %checkpoint_id, job_id = %req.job_id, epoch = req.epoch, step = req.step, "checkpoint begun");
+        tracing::info!(
+            correlation_id = %correlation_id,
+            checkpoint_id = %checkpoint_id,
+            job_id = %req.job_id,
+            epoch = req.epoch,
+            step = req.step,
+            "checkpoint begun"
+        );
         Ok(Response::new(CheckpointBeginResponse {
             checkpoint_id,
             storage_path,
@@ -200,12 +196,12 @@ impl CoordinatorService for CoordinatorServiceImpl {
     ) -> Result<Response<CheckpointCommitResponse>, Status> {
         let correlation_id = correlation_id_for_request(&request, None);
         let req = request.into_inner();
-        let _span = tracing::info_span!(
-            "coordinator.checkpoint_commit",
+        tracing::trace!(
             correlation_id = %correlation_id,
-            checkpoint_id = %req.checkpoint_id
-        )
-        .entered();
+            checkpoint_id = %req.checkpoint_id,
+            worker_id = %req.worker_id,
+            "checkpoint commit received"
+        );
         let all_done = self
             .checkpoint_engine
             .worker_commit(&req.checkpoint_id, &req.worker_id, req.bytes_written)
@@ -216,7 +212,12 @@ impl CoordinatorService for CoordinatorServiceImpl {
                 CheckpointError::AlreadyCommitted(_) => Status::already_exists(e.to_string()),
             })?;
         if all_done {
-            if let Some(started_at) = self.checkpoint_started.lock().await.remove(&req.checkpoint_id) {
+            if let Some(started_at) = self
+                .checkpoint_started
+                .lock()
+                .await
+                .remove(&req.checkpoint_id)
+            {
                 metrics::observe_checkpoint_write_latency(started_at.elapsed().as_secs_f64());
             }
         }
@@ -231,17 +232,20 @@ impl CoordinatorService for CoordinatorServiceImpl {
     ) -> Result<Response<CheckpointAbortResponse>, Status> {
         let correlation_id = correlation_id_for_request(&request, None);
         let req = request.into_inner();
-        let _span = tracing::info_span!(
-            "coordinator.checkpoint_abort",
+        tracing::warn!(
             correlation_id = %correlation_id,
-            checkpoint_id = %req.checkpoint_id
-        )
-        .entered();
+            checkpoint_id = %req.checkpoint_id,
+            reason = %req.reason,
+            "checkpoint abort requested"
+        );
         let acknowledged = self
             .checkpoint_engine
             .abort(&req.checkpoint_id, &req.reason)
             .await;
-        self.checkpoint_started.lock().await.remove(&req.checkpoint_id);
+        self.checkpoint_started
+            .lock()
+            .await
+            .remove(&req.checkpoint_id);
         Ok(Response::new(CheckpointAbortResponse { acknowledged }))
     }
 
@@ -253,12 +257,6 @@ impl CoordinatorService for CoordinatorServiceImpl {
         let req = request.into_inner();
         let correlation_id = incoming_correlation_id
             .unwrap_or_else(|| fresh_correlation_id(Some(&req.last_checkpoint_id)));
-        let _span = tracing::info_span!(
-            "coordinator.recover_worker",
-            correlation_id = %correlation_id,
-            job_id = %req.last_checkpoint_id
-        )
-        .entered();
         // last_checkpoint_id carries the job_id on restart
         let job_id = &req.last_checkpoint_id;
 
@@ -304,6 +302,7 @@ impl CoordinatorService for CoordinatorServiceImpl {
         let checkpoint_path = format!("checkpoints/{}/committed/", meta.checkpoint_id);
 
         tracing::info!(
+            correlation_id = %correlation_id,
             worker_id = %req.worker_id,
             job_id = %job_id,
             step = meta.step,
@@ -328,12 +327,7 @@ impl CoordinatorService for CoordinatorServiceImpl {
         let job_id = req.job_id;
         let correlation_id =
             incoming_correlation_id.unwrap_or_else(|| fresh_correlation_id(Some(&job_id)));
-        let _span = tracing::info_span!(
-            "coordinator.get_job_status",
-            correlation_id = %correlation_id,
-            job_id = %job_id
-        )
-        .entered();
+        tracing::trace!(correlation_id = %correlation_id, job_id = %job_id, "job status requested");
         let datasets: Vec<DatasetSummary> = self
             .registry
             .list_for_job(&job_id)
@@ -366,12 +360,7 @@ impl CoordinatorService for CoordinatorServiceImpl {
         let job_id = req.job_id;
         let correlation_id =
             incoming_correlation_id.unwrap_or_else(|| fresh_correlation_id(Some(&job_id)));
-        let _span = tracing::info_span!(
-            "coordinator.list_checkpoints",
-            correlation_id = %correlation_id,
-            job_id = %job_id
-        )
-        .entered();
+        tracing::trace!(correlation_id = %correlation_id, job_id = %job_id, "list checkpoints requested");
         let checkpoints: Vec<CheckpointEntry> = match self.checkpoint_engine.checkpoint_registry() {
             None => vec![],
             Some(reg) => {
@@ -400,12 +389,7 @@ impl CoordinatorService for CoordinatorServiceImpl {
         let correlation_id = correlation_id_for_request(&request, None);
         let req = request.into_inner();
         let version = req.version;
-        let _span = tracing::info_span!(
-            "coordinator.get_checkpoint_restore_info",
-            correlation_id = %correlation_id,
-            version
-        )
-        .entered();
+        tracing::trace!(correlation_id = %correlation_id, version, "checkpoint restore info requested");
         let meta = match self.checkpoint_engine.checkpoint_registry() {
             None => None,
             Some(reg) => {

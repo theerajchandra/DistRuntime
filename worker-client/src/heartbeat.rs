@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tonic::transport::Channel;
 use tonic::metadata::MetadataValue;
+use tonic::transport::Channel;
 
 use crate::metrics;
 

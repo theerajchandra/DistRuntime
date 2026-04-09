@@ -69,11 +69,7 @@ impl CoordinatorMetrics {
 
 static METRICS: Lazy<CoordinatorMetrics> = Lazy::new(CoordinatorMetrics::new);
 
-pub fn observe_worker_throughput(
-    worker_id: &str,
-    bytes_per_sec: f64,
-    records_per_sec: f64,
-) {
+pub fn observe_worker_throughput(worker_id: &str, bytes_per_sec: f64, records_per_sec: f64) {
     METRICS
         .shard_read_bytes_per_sec
         .with_label_values(&[worker_id])
