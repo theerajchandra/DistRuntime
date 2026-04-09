@@ -25,3 +25,4 @@ tempfile.workspace = true
 tokio-stream.workspace = true
 worker-client.workspace = true
 checkpoint-engine.workspace = true
+rand = "0.8"
