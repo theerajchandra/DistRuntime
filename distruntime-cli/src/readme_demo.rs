@@ -130,8 +130,8 @@ async fn main() -> Result<()> {
         let assignments = heartbeat(&mut client, worker_id).await?;
         println!("       {worker_id:<8} {}", format_assignments(&assignments));
     }
-    println!();
-    pause().await;
+    println!("     holding stable state for 10 seconds before restart\n");
+    tokio::time::sleep(Duration::from_secs(10)).await;
 
     println!("5/5  Restarting worker-c and recovering from the committed checkpoint");
     client
