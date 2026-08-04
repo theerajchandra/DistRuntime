@@ -130,8 +130,7 @@ async fn main() -> Result<()> {
         let assignments = heartbeat(&mut client, worker_id).await?;
         println!("       {worker_id:<8} {}", format_assignments(&assignments));
     }
-    println!("     holding stable state for 10 seconds before restart\n");
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    println!();
 
     println!("5/5  Restarting worker-c and recovering from the committed checkpoint");
     client
@@ -174,6 +173,8 @@ async fn main() -> Result<()> {
     println!("     dataset: {DATASET_NAME} (16 shards)");
     println!("     checkpoint: step-1000 [committed]");
     println!("     recovery: ready");
+    println!("\n     holding final status for 30 seconds");
+    tokio::time::sleep(Duration::from_secs(30)).await;
 
     survivor_heartbeats.abort();
 

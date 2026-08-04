@@ -9,6 +9,6 @@ Type "./target/release/distruntime start-coordinator --heartbeat-interval-ms 120
 Sleep 1s
 
 Type "./target/release/distruntime-demo http://127.0.0.1:8787" Enter
-Sleep 20s
+Sleep 40s
 
 Sleep 3s
