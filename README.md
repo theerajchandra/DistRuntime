@@ -6,6 +6,8 @@ Built with a Rust core for all I/O-critical paths and a Python surface for ML en
 
 ![DistRuntime demo](assets/demo.gif)
 
+The recorded scenario starts the release-built coordinator, distributes 16 shards across three workers, commits a checkpoint, detects a worker failure and rebalances the shards, then restarts that worker from the committed checkpoint.
+
 ---
 
 ## What it does

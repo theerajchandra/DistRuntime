@@ -8,6 +8,10 @@ license.workspace = true
 name = "distruntime"
 path = "src/main.rs"
 
+[[bin]]
+name = "distruntime-demo"
+path = "src/readme_demo.rs"
+
 [dependencies]
 tokio.workspace = true
 tonic.workspace = true
